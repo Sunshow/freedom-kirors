@@ -62,7 +62,6 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 
-
     /// 凭据优先级（数字越小优先级越高，默认为 0）
     #[serde(default)]
     #[serde(skip_serializing_if = "is_zero")]
@@ -271,6 +270,24 @@ impl KiroCredentials {
         self.api_region
             .as_deref()
             .unwrap_or(config.effective_api_region())
+    }
+
+    /// 从真实 profileArn 提取区域，例如：
+    /// `arn:aws:codewhisperer:eu-central-1:...:profile/...` → `eu-central-1`。
+    pub fn profile_arn_region(&self) -> Option<&str> {
+        self.effective_profile_arn()
+            .and_then(|arn| arn.split(':').nth(3))
+            .filter(|region| !region.trim().is_empty())
+    }
+
+    /// 获取聊天/IDE 端点应使用的 API Region。
+    ///
+    /// Enterprise / IdC 多 profile 场景下，`profileArn` 自带真实区域；
+    /// 若继续用默认 api_region，会出现 eu profile 打到 us endpoint 后返回
+    /// `400 Improperly formed request`。因此真实 profileArn 区域优先。
+    pub fn effective_streaming_api_region<'a>(&'a self, config: &'a Config) -> &'a str {
+        self.profile_arn_region()
+            .unwrap_or_else(|| self.effective_api_region(config))
     }
 
     /// 获取有效的代理配置

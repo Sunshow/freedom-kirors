@@ -19,18 +19,17 @@ use crate::model::config::Config;
 use super::error::AdminServiceError;
 use super::proxy_pool::{GetUrlResult, ProxyPoolManager};
 use super::types::{
-    AccountThrottleConfigResponse, AddCredentialRequest, AddCredentialResponse,
-    AssignProxyRequest, AssignRoundRobinResponse, AvailableModelItem, AvailableModelsResponse,
-    BalanceResponse, BatchAddProxyRequest,
-    CheckRateLimitRequest, CredentialStatusItem, CredentialsStatusResponse, EnableOverageAllResult,
-    GitHubRateLimitInfo, ImageUpdateResponse, ExportedAccount, ExportedCredentials,
-    CredentialsExportResponse,
-    LoadBalancingModeResponse, LogGovernanceConfigResponse, PollIdcLoginResponse,
-    ProxyCheckAllResponse, ProxyCheckResponse, ProxyPoolEntry, ProxyPoolResponse,
-    QuotaExceededResult, SetAccountThrottleConfigRequest, SetLoadBalancingModeRequest,
-    SetLogGovernanceConfigRequest, SetUpdateConfigRequest, StartIdcLoginRequest,
-    StartIdcLoginResponse, StartSocialLoginRequest, StartSocialLoginResponse, UpdateCheckInfo,
-    UpdateConfigResponse, UpdateCredentialRequest, UpdateRefreshTokenRequest,
+    AccountThrottleConfigResponse, AddCredentialRequest, AddCredentialResponse, AssignProxyRequest,
+    AssignRoundRobinResponse, AvailableModelItem, AvailableModelsResponse, AvailableProfileItem,
+    BalanceResponse, BatchAddProxyRequest, CheckRateLimitRequest, CredentialStatusItem,
+    CredentialsExportResponse, CredentialsStatusResponse, EnableOverageAllResult,
+    ExpandProfilesResponse, ExportedAccount, ExportedCredentials, GitHubRateLimitInfo,
+    ImageUpdateResponse, LoadBalancingModeResponse, LogGovernanceConfigResponse,
+    PollIdcLoginResponse, ProxyCheckAllResponse, ProxyCheckResponse, ProxyPoolEntry,
+    ProxyPoolResponse, QuotaExceededResult, SetAccountThrottleConfigRequest,
+    SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetUpdateConfigRequest,
+    StartIdcLoginRequest, StartIdcLoginResponse, StartSocialLoginRequest, StartSocialLoginResponse,
+    UpdateCheckInfo, UpdateConfigResponse, UpdateCredentialRequest, UpdateRefreshTokenRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -241,7 +240,10 @@ const BUILD_TYPE: &str = "binary";
 /// 文件名中带版本号，便于 apply 复用 pull 已下载的二进制（命中时跳过重新下载）。
 fn staged_binary_path(exe: &std::path::Path, version: &str) -> std::path::PathBuf {
     let mut s = exe.as_os_str().to_os_string();
-    s.push(format!(".staged-{}", version.trim().trim_start_matches('v')));
+    s.push(format!(
+        ".staged-{}",
+        version.trim().trim_start_matches('v')
+    ));
     std::path::PathBuf::from(s)
 }
 
@@ -486,12 +488,16 @@ impl AdminService {
                     auth_method: entry.auth_method,
                     provider: entry.provider,
                     has_profile_arn: entry.has_profile_arn,
+                    profile_arn: entry.profile_arn,
                     refresh_token_hash: entry.refresh_token_hash,
                     api_key_hash: entry.api_key_hash,
                     masked_api_key: entry.masked_api_key,
                     email: entry.email,
                     success_count: entry.success_count,
                     last_used_at: entry.last_used_at.clone(),
+                    in_flight: entry.in_flight,
+                    peak_in_flight: entry.peak_in_flight,
+                    last_throttle_in_flight: entry.last_throttle_in_flight,
                     has_proxy: entry.has_proxy,
                     proxy_url: entry.proxy_url,
                     refresh_failure_count: entry.refresh_failure_count,
@@ -856,8 +862,8 @@ impl AdminService {
                         );
 
                         let hit = now.hour() == target_hour && now.minute() == target_minute;
-                        let already_ran_this_minute = last_run_marker.as_deref()
-                            == Some(date_minute_marker.as_str());
+                        let already_ran_this_minute =
+                            last_run_marker.as_deref() == Some(date_minute_marker.as_str());
 
                         if hit && !already_ran_this_minute {
                             last_run_marker = Some(date_minute_marker);
@@ -873,7 +879,7 @@ impl AdminService {
                                     info.latest_version,
                                     info.current_version
                                 );
-                            match svc.apply_image_update().await {
+                                match svc.apply_image_update().await {
                                     Ok(res) => {
                                         tracing::info!("自动更新完成：{}", res.message);
                                         last_applied_version = Some(info.latest_version);
@@ -924,6 +930,7 @@ impl AdminService {
 
         // 构建凭据对象
         let email = req.email.clone();
+        let should_expand_profiles = !req.auth_method.eq_ignore_ascii_case("api_key");
         let new_cred = KiroCredentials {
             id: None,
             access_token: req.access_token,
@@ -963,6 +970,19 @@ impl AdminService {
             tracing::warn!("添加凭据后刷新余额失败（不影响凭据添加）: {}", e);
         }
 
+        // Enterprise / IdC 账号可能同一 refreshToken 下存在多个可用 profile。
+        // 添加其中一个后，后台自动扫描 ListAvailableProfiles 并把缺失 profile 拆成独立凭据。
+        // 失败不影响本条凭据添加（例如 BuilderID 无 profile、上游临时 403/429）。
+        if should_expand_profiles {
+            if let Err(e) = self.token_manager.expand_profiles_for(credential_id).await {
+                tracing::warn!(
+                    "添加凭据后自动扫描/补齐 profile 失败（不影响凭据添加） #{}: {}",
+                    credential_id,
+                    e
+                );
+            }
+        }
+
         Ok(AddCredentialResponse {
             success: true,
             message: format!("凭据添加成功，ID: {}", credential_id),
@@ -986,6 +1006,8 @@ impl AdminService {
                 req.proxy_username
                     .map(|v| if v.is_empty() { None } else { Some(v) }),
                 req.proxy_password
+                    .map(|v| if v.is_empty() { None } else { Some(v) }),
+                req.profile_arn
                     .map(|v| if v.is_empty() { None } else { Some(v) }),
             )
             .map_err(|e| self.classify_error(e, id))
@@ -1156,10 +1178,7 @@ impl AdminService {
             message: if reused {
                 format!("v{} 已下载并校验，可直接执行「更新并重启」", version)
             } else {
-                format!(
-                    "已下载并校验 v{} 二进制，可直接执行「更新并重启」",
-                    version
-                )
+                format!("已下载并校验 v{} 二进制，可直接执行「更新并重启」", version)
             },
             output: Some(format!(
                 "{}: v{}\nstaged: {}",
@@ -1424,10 +1443,7 @@ impl AdminService {
     /// `req.github_token` 不为空时使用该 token 验证（用于"保存前先试一下"），
     /// 否则使用配置中已保存的 `config.github_token`，再缺则匿名查询。
     /// `/rate_limit` 端点本身不消耗任何配额。
-    pub async fn check_rate_limit(
-        &self,
-        req: CheckRateLimitRequest,
-    ) -> GitHubRateLimitInfo {
+    pub async fn check_rate_limit(&self, req: CheckRateLimitRequest) -> GitHubRateLimitInfo {
         // 优先用入参 token；空字符串视作"尝试匿名"；缺省回退到已保存 token
         let token = req
             .github_token
@@ -1543,13 +1559,22 @@ impl AdminService {
             .get("resources")
             .and_then(|r| r.get("core"))
             .or_else(|| payload.get("rate"));
-        let limit = core.and_then(|c| c.get("limit")).and_then(|v| v.as_u64()).unwrap_or(0);
+        let limit = core
+            .and_then(|c| c.get("limit"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let remaining = core
             .and_then(|c| c.get("remaining"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let used = core.and_then(|c| c.get("used")).and_then(|v| v.as_u64()).unwrap_or(0);
-        let reset = core.and_then(|c| c.get("reset")).and_then(|v| v.as_u64()).unwrap_or(0);
+        let used = core
+            .and_then(|c| c.get("used"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let reset = core
+            .and_then(|c| c.get("reset"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
         // 同时尝试拿 token 对应的用户名；失败不影响主结果
         let login = if authenticated {
@@ -1797,9 +1822,9 @@ impl AdminService {
                 skipped.push(entry.id);
                 continue;
             }
-            let cached = cache_snapshot.get(&entry.id).filter(|c| {
-                (now_ts - c.cached_at) < BALANCE_CACHE_TTL_SECS as f64
-            });
+            let cached = cache_snapshot
+                .get(&entry.id)
+                .filter(|c| (now_ts - c.cached_at) < BALANCE_CACHE_TTL_SECS as f64);
 
             match cached {
                 // 缓存命中：明确不可开启，跳过
@@ -1822,7 +1847,11 @@ impl AdminService {
         let mut failure_messages: Vec<String> = Vec::new();
 
         for id in targets {
-            match self.token_manager.set_user_preference_for(id, "ENABLED").await {
+            match self
+                .token_manager
+                .set_user_preference_for(id, "ENABLED")
+                .await
+            {
                 Ok(()) => {
                     enabled_ids.push(id);
                     // 失效本地缓存
@@ -1849,6 +1878,52 @@ impl AdminService {
             failed_ids,
             failure_messages,
         }
+    }
+
+    /// 扫描某个 Enterprise / IdC 凭据的可用 profiles，并自动补齐缺失 profile 凭据。
+    pub async fn expand_profiles(
+        &self,
+        id: u64,
+    ) -> Result<ExpandProfilesResponse, AdminServiceError> {
+        let (profiles, created_ids, profile_arns) = self
+            .token_manager
+            .expand_profiles_for(id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?;
+
+        let profile_items = profiles
+            .into_iter()
+            .map(|p| AvailableProfileItem {
+                arn: p.arn,
+                profile_name: p.profile_name,
+            })
+            .collect::<Vec<_>>();
+
+        let message = if profile_items.is_empty() {
+            format!("凭据 #{} 未发现可用 Enterprise / IdC profile", id)
+        } else if created_ids.is_empty() {
+            format!(
+                "凭据 #{} 已有全部 {} 个可用 profile，无需新增",
+                id,
+                profile_items.len()
+            )
+        } else {
+            format!(
+                "凭据 #{} 发现 {} 个可用 profile，已新增 {} 条凭据",
+                id,
+                profile_items.len(),
+                created_ids.len()
+            )
+        };
+
+        Ok(ExpandProfilesResponse {
+            success: true,
+            credential_id: id,
+            profiles: profile_items,
+            profile_arns,
+            created_ids,
+            message,
+        })
     }
 
     /// 强制刷新指定凭据的 Token
@@ -2075,6 +2150,7 @@ impl AdminService {
                 Some(proxy_url), // 设置或清除 proxy_url（Some(None) = 清除，Some(Some(url)) = 设置）
                 None,            // proxy_username 不修改
                 None,            // proxy_password 不修改
+                None,            // profile_arn 不修改
             )
             .map_err(|e| {
                 let msg = e.to_string();
@@ -2144,7 +2220,7 @@ impl AdminService {
             let url = urls[i % urls.len()].clone();
             if self
                 .token_manager
-                .update_credential(*cred_id, None, Some(Some(url)), None, None)
+                .update_credential(*cred_id, None, Some(Some(url)), None, None, None)
                 .is_ok()
             {
                 assigned += 1;
@@ -2862,9 +2938,8 @@ mod tests {
         cred.email = Some("e@example.com".to_string());
         cred.expires_at = Some("2026-06-06T00:00:00Z".to_string());
         // 占位符 profileArn 应在导出时被剥离
-        cred.profile_arn = Some(
-            crate::kiro::model::credentials::BUILDER_ID_PROFILE_ARN.to_string(),
-        );
+        cred.profile_arn =
+            Some(crate::kiro::model::credentials::BUILDER_ID_PROFILE_ARN.to_string());
 
         let acc = credential_to_export_account(cred).expect("应生成账号");
 
@@ -2897,7 +2972,10 @@ mod tests {
         assert_eq!(subscription_type_from_title(Some("KIRO FREE")), "Free");
         assert_eq!(subscription_type_from_title(Some("KIRO PRO+")), "Pro_Plus");
         assert_eq!(subscription_type_from_title(Some("KIRO PRO")), "Pro");
-        assert_eq!(subscription_type_from_title(Some("KIRO POWER")), "Enterprise");
+        assert_eq!(
+            subscription_type_from_title(Some("KIRO POWER")),
+            "Enterprise"
+        );
         assert_eq!(subscription_type_from_title(None), "Free");
     }
 }

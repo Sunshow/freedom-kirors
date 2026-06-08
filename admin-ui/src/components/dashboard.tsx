@@ -91,7 +91,7 @@ import {
   useSetPriority,
 } from "@/hooks/use-credentials";
 import { useUpdateCheck } from "@/hooks/use-update-check";
-import { useFailureStats } from "@/hooks/use-traces";
+import { useFailureStats, useRecentStats } from "@/hooks/use-traces";
 import { useRectSelect } from "@/hooks/use-rect-select";
 import {
   DndContext,
@@ -296,8 +296,17 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
   const setPriority = useSetPriority();
   const { data: updateCheck } = useUpdateCheck();
   const { data: failureStatsMap } = useFailureStats();
+  const { data: recentStatsMap } = useRecentStats();
 
   const allCredentials = data?.credentials || [];
+  const totalInFlight = allCredentials.reduce(
+    (sum, c) => sum + (c.inFlight ?? 0),
+    0,
+  );
+  const activeInFlightCredentials = allCredentials.filter(
+    (c) => (c.inFlight ?? 0) > 0,
+  ).length;
+  const concurrencyVersion = "RAM实时并发 v2026-06-07-1325";
   const subscriptionStats = (() => {
     let pro = 0, proPlus = 0, power = 0, free = 0, unknown = 0;
     let availablePro = 0, availableProPlus = 0, availablePower = 0, availableFree = 0;
@@ -1277,8 +1286,17 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
           </div>
         </div>
 
+        <div className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-medium">当前并发已接入：RAM {totalInFlight}</div>
+            <div className="text-xs opacity-80">
+              活跃凭据 {activeInFlightCredentials} 个 · {concurrencyVersion}
+            </div>
+          </div>
+        </div>
+
         {/* 统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-3 mb-6">
+        <div className="grid gap-4 md:grid-cols-4 mb-6">
           <Card className="hover:shadow-apple-lg hover:-translate-y-0.5">
             <CardContent className="p-5">
               <div className="text-[13px] font-medium text-muted-foreground">
@@ -1309,6 +1327,21 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                   #{data?.currentId || "-"}
                 </span>
                 {data?.currentId && <Badge variant="success">活跃</Badge>}
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="hover:shadow-apple-lg hover:-translate-y-0.5">
+            <CardContent className="p-5">
+              <div className="text-[13px] font-medium text-muted-foreground">
+                实时并发 RAM
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-3xl font-semibold tracking-tight tabular-nums text-emerald-600 dark:text-emerald-400">
+                  {formatNumber(totalInFlight)}
+                </span>
+                <Badge variant={totalInFlight > 0 ? "success" : "secondary"}>
+                  当前
+                </Badge>
               </div>
             </CardContent>
           </Card>
@@ -1731,6 +1764,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                         handleRefreshBalance(credential.id)
                       }
                       failureStats={failureStatsMap?.[String(credential.id)]}
+                      recentStats={recentStatsMap?.[String(credential.id)]}
                     />
                   ))}
                 </div>

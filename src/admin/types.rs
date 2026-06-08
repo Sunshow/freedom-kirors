@@ -44,6 +44,9 @@ pub struct CredentialStatusItem {
     pub provider: Option<String>,
     /// 是否有 Profile ARN
     pub has_profile_arn: bool,
+    /// Profile ARN（Enterprise / IdC 多 profile 排查用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
     /// refreshToken 的 SHA-256 哈希（仅 OAuth 凭据，用于前端去重）
     pub refresh_token_hash: Option<String>,
     /// kiroApiKey 的 SHA-256 哈希（仅 API Key 凭据，用于前端去重）
@@ -56,6 +59,13 @@ pub struct CredentialStatusItem {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 当前正在使用该凭据的上游请求数（实时并发）
+    pub in_flight: u64,
+    /// 进程启动后观测到的最高实时并发
+    pub peak_in_flight: u64,
+    /// 最近一次 429 / 账号风控发生时观测到的并发
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_throttle_in_flight: Option<u64>,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
     /// 代理 URL（用于前端展示）
@@ -134,7 +144,6 @@ pub struct AddCredentialRequest {
     #[serde(default, alias = "client_secret")]
     pub client_secret: Option<String>,
 
-
     /// 优先级（可选，默认 0）
     #[serde(default)]
     pub priority: u32,
@@ -173,7 +182,11 @@ pub struct AddCredentialRequest {
 
     /// Kiro API Key（API Key 凭据必填，格式: ksk_xxxxxxxx）
     /// 设置后直接作为 Bearer Token 使用，无需 refreshToken
-    #[serde(default, alias = "kiro_api_key", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "kiro_api_key",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub kiro_api_key: Option<String>,
 
     /// 端点名称（可选，未配置时使用 config.defaultEndpoint）
@@ -211,6 +224,8 @@ pub struct UpdateCredentialRequest {
     pub proxy_username: Option<String>,
     /// 凭据级代理认证密码
     pub proxy_password: Option<String>,
+    /// Profile ARN（空字符串表示清除；Enterprise / IdC 可用来快速切换区域/profile）
+    pub profile_arn: Option<String>,
 }
 
 /// 添加凭据成功响应
@@ -255,6 +270,28 @@ pub struct BalanceResponse {
     /// 上游 `overageCapability` 原始字符串（用于排查"未知"状态）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overage_capability_raw: Option<String>,
+}
+
+// ============ 可用 Profile 查询 / 自动补齐 ============
+
+/// 单个可用 Profile
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableProfileItem {
+    pub arn: Option<String>,
+    pub profile_name: Option<String>,
+}
+
+/// Profile 扫描与自动补齐结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandProfilesResponse {
+    pub success: bool,
+    pub credential_id: u64,
+    pub profiles: Vec<AvailableProfileItem>,
+    pub profile_arns: Vec<String>,
+    pub created_ids: Vec<u64>,
+    pub message: String,
 }
 
 // ============ 可用模型查询 ============

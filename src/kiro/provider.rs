@@ -16,7 +16,7 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{InFlightGuard, MultiTokenManager};
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
 
@@ -82,6 +82,8 @@ impl ClientCache {
 pub struct KiroCallResult {
     pub response: reqwest::Response,
     pub credential_id: u64,
+    /// 持有实时并发 guard，直到响应对象被消费/丢弃才扣减 in-flight。
+    pub _in_flight_guard: Option<InFlightGuard>,
 }
 
 /// Kiro API Provider
@@ -132,8 +134,8 @@ impl KiroProvider {
         );
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client（作为受保护的常驻条目）
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let client_cache = ClientCache::new(proxy.clone(), initial_client, CLIENT_CACHE_CAP);
 
         Self {
@@ -160,10 +162,7 @@ impl KiroProvider {
     }
 
     /// 根据凭据选择 endpoint 实现
-    fn endpoint_for(
-        &self,
-        credentials: &KiroCredentials,
-    ) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
+    fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
         let name = credentials
             .endpoint
             .as_deref()
@@ -218,7 +217,11 @@ impl KiroProvider {
             }
             Err(e) => {
                 // 网络/瞬态错误：不标记，下次请求再试；本次按原 profileArn 继续
-                tracing::warn!("凭据 #{} 解析真实 profileArn 失败（按原 profileArn 继续）: {}", ctx.id, e);
+                tracing::warn!(
+                    "凭据 #{} 解析真实 profileArn 失败（按原 profileArn 继续）: {}",
+                    ctx.id,
+                    e
+                );
             }
         }
     }
@@ -346,7 +349,12 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }
@@ -422,8 +430,14 @@ impl KiroProvider {
                 Ok(c) => c,
                 Err(e) => {
                     Self::emit_attempt(
-                        sink, attempt, 0, "", None, outcome::UNKNOWN,
-                        Some(&e.to_string()), attempt_start,
+                        sink,
+                        attempt,
+                        0,
+                        "",
+                        None,
+                        outcome::UNKNOWN,
+                        Some(&e.to_string()),
+                        attempt_start,
                     );
                     last_error = Some(e);
                     continue;
@@ -440,8 +454,14 @@ impl KiroProvider {
                 Ok(e) => e,
                 Err(e) => {
                     Self::emit_attempt(
-                        sink, attempt, ctx.id, "", None, outcome::UNKNOWN,
-                        Some(&e.to_string()), attempt_start,
+                        sink,
+                        attempt,
+                        ctx.id,
+                        "",
+                        None,
+                        outcome::UNKNOWN,
+                        Some(&e.to_string()),
+                        attempt_start,
                     );
                     last_error = Some(e);
                     self.token_manager.report_failure(ctx.id);
@@ -472,12 +492,15 @@ impl KiroProvider {
             let request = endpoint.decorate_api(base, &rctx);
 
             // 打印实际发送的请求头（RUST_LOG=debug 时输出，便于排查问题）
-            let request = request.build().map_err(|e| anyhow::anyhow!("构建请求失败: {}", e))?;
+            let request = request
+                .build()
+                .map_err(|e| anyhow::anyhow!("构建请求失败: {}", e))?;
             if tracing::enabled!(tracing::Level::DEBUG) {
                 for (k, v) in request.headers() {
                     tracing::debug!("  header {}: {}", k, v.to_str().unwrap_or("<binary>"));
                 }
             }
+            let in_flight_guard = self.token_manager.begin_in_flight(ctx.id);
             let response = match self.client_for(&ctx.credentials)?.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -488,8 +511,14 @@ impl KiroProvider {
                         e
                     );
                     Self::emit_attempt(
-                        sink, attempt, ctx.id, endpoint_name, None,
-                        outcome::NETWORK_ERROR, Some(&e.to_string()), attempt_start,
+                        sink,
+                        attempt,
+                        ctx.id,
+                        endpoint_name,
+                        None,
+                        outcome::NETWORK_ERROR,
+                        Some(&e.to_string()),
+                        attempt_start,
                     );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
@@ -506,13 +535,20 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::SUCCESS, None, attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::SUCCESS,
+                    None,
+                    attempt_start,
                 );
                 self.token_manager.report_success(ctx.id);
                 return Ok(KiroCallResult {
                     response,
                     credential_id: ctx.id,
+                    _in_flight_guard: Some(in_flight_guard),
                 });
             }
 
@@ -529,8 +565,14 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::QUOTA_EXHAUSTED, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::QUOTA_EXHAUSTED,
+                    Some(&body),
+                    attempt_start,
                 );
 
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
@@ -555,8 +597,14 @@ impl KiroProvider {
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(400),
-                    outcome::BAD_REQUEST, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(400),
+                    outcome::BAD_REQUEST,
+                    Some(&body),
+                    attempt_start,
                 );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -571,15 +619,26 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::AUTH_FAILED, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::AUTH_FAILED,
+                    Some(&body),
+                    attempt_start,
                 );
 
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }
@@ -616,19 +675,32 @@ impl KiroProvider {
                     .get_account_throttle_cooldown_secs()
                     .max(1);
                 let cooldown = std::time::Duration::from_secs(cooldown_secs);
+                let observed_in_flight = self
+                    .token_manager
+                    .mark_throttle_observed(ctx.id)
+                    .unwrap_or(0);
                 tracing::warn!(
-                    "API 请求失败（账号级风控，凭据 #{} 冷却 {}s 并切换，尝试 {}/{}）: {}",
+                    "API 请求失败（账号级风控，凭据 #{} 冷却 {}s 并切换，触发时并发 {}，尝试 {}/{}）: {}",
                     ctx.id,
                     cooldown_secs,
+                    observed_in_flight,
                     attempt + 1,
                     max_retries,
                     body
                 );
 
-                let remaining = self.token_manager.report_account_throttled(ctx.id, cooldown);
+                let remaining = self
+                    .token_manager
+                    .report_account_throttled(ctx.id, cooldown);
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(429),
-                    outcome::ACCOUNT_THROTTLED, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(429),
+                    outcome::ACCOUNT_THROTTLED,
+                    Some(&body),
+                    attempt_start,
                 );
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败（账号级风控，凭据 #{} 已冷却 {} 分钟）: {} {}",
@@ -666,8 +738,14 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::BAD_REQUEST, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::BAD_REQUEST,
+                    Some(&body),
+                    attempt_start,
                 );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -676,11 +754,7 @@ impl KiroProvider {
             // 放大客户端等待时间和 Claude 端 Retrying 轮数；快速返回，让客户端下一次调用
             // 重新建连。
             if status.as_u16() == 524 || endpoint.is_gateway_timeout(&body) {
-                tracing::warn!(
-                    "API 请求失败（上游网关超时，不重试）: {} {}",
-                    status,
-                    body
-                );
+                tracing::warn!("API 请求失败（上游网关超时，不重试）: {} {}", status, body);
                 Self::emit_attempt(
                     sink,
                     attempt,
@@ -697,16 +771,28 @@ impl KiroProvider {
             // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
             // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                let observed_in_flight = if status.as_u16() == 429 {
+                    self.token_manager.mark_throttle_observed(ctx.id)
+                } else {
+                    None
+                };
                 tracing::warn!(
-                    "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
+                    "API 请求失败（上游瞬态错误，触发时并发 {:?}，尝试 {}/{}）: {} {}",
+                    observed_in_flight,
                     attempt + 1,
                     max_retries,
                     status,
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::TRANSIENT, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::TRANSIENT,
+                    Some(&body),
+                    attempt_start,
                 );
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
@@ -723,8 +809,14 @@ impl KiroProvider {
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
             if status.is_client_error() {
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::BAD_REQUEST, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::BAD_REQUEST,
+                    Some(&body),
+                    attempt_start,
                 );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -738,8 +830,14 @@ impl KiroProvider {
                 body
             );
             Self::emit_attempt(
-                sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                outcome::UNKNOWN, Some(&body), attempt_start,
+                sink,
+                attempt,
+                ctx.id,
+                endpoint_name,
+                Some(status.as_u16()),
+                outcome::UNKNOWN,
+                Some(&body),
+                attempt_start,
             );
             last_error = Some(anyhow::anyhow!(
                 "{} API 请求失败: {} {}",

@@ -310,10 +310,10 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
       setResults(initialResults)
 
       // 重复检测
-      const existingTokenHashes = new Set(
+      const existingTokenKeys = new Set(
         existingCredentials?.credentials
-          .map(c => c.refreshTokenHash)
-          .filter((hash): hash is string => Boolean(hash)) || []
+          .map(c => c.refreshTokenHash ? `${c.refreshTokenHash}:${(c.profileArn || '').trim()}` : '')
+          .filter((key): key is string => Boolean(key)) || []
       )
 
       let successCount = 0
@@ -345,9 +345,11 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
         })
 
         // 检查重复
-        if (existingTokenHashes.has(tokenHash)) {
+        const profileKey = cred.profileArn?.trim() || ''
+        const duplicateKey = `${tokenHash}:${profileKey}`
+        if (existingTokenKeys.has(duplicateKey)) {
           duplicateCount++
-          const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === tokenHash)
+          const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === tokenHash && ((c.profileArn || '').trim() === profileKey))
           setResults(prev => {
             const next = [...prev]
             next[i] = { ...next[i], status: 'duplicate', error: '该凭据已存在', email: existingCred?.email || account.email }
@@ -405,7 +407,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
           const balance = await getCredentialBalance(addedCred.credentialId)
 
           successCount++
-          existingTokenHashes.add(tokenHash)
+          existingTokenKeys.add(`${tokenHash}:${cred.profileArn?.trim() || ''}`)
           setCurrentProcessing(`验活成功: ${addedCred.email || account.email || `账号 ${i + 1}`}`)
           setResults(prev => {
             const next = [...prev]

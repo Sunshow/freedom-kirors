@@ -8,10 +8,10 @@
 //! `400 {"message":"profileArn is required for this request."}` 拒绝；带 BuilderID
 //! 占位符则会因 token 身份不匹配被拒绝。真实 profileArn 只能通过本接口获取。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// `ListAvailableProfiles` 响应
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ListAvailableProfilesResponse {
     /// 该凭据可用的 profile 列表
@@ -25,7 +25,7 @@ pub struct ListAvailableProfilesResponse {
 }
 
 /// 单个可用 profile
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableProfile {
     /// Profile ARN（真实可用的 profileArn）

@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { getTraces, getFailureStats } from '@/api/traces'
+import { getTraces, getFailureStats, getRecentStats } from '@/api/traces'
 import type { TraceQuery } from '@/types/api'
 
 /**
@@ -27,6 +27,17 @@ export function useFailureStats() {
     queryFn: getFailureStats,
     refetchInterval: 30_000,
     staleTime: 10_000,
+    refetchOnWindowFocus: false,
+  })
+}
+
+/** 最近 1 小时按凭据聚合的调用概况，用于卡片显示压测/并发健康度 */
+export function useRecentStats() {
+  return useQuery({
+    queryKey: ['traces', 'recent-stats'],
+    queryFn: getRecentStats,
+    refetchInterval: 10_000,
+    staleTime: 5_000,
     refetchOnWindowFocus: false,
   })
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as TokioMutex;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +20,7 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::kiro_version::USAGE_API_KIRO_VERSION;
 use crate::kiro::machine_id;
 use crate::kiro::model::available_models::ListAvailableModelsResponse;
-use crate::kiro::model::available_profiles::ListAvailableProfilesResponse;
+use crate::kiro::model::available_profiles::{AvailableProfile, ListAvailableProfilesResponse};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
@@ -342,6 +342,35 @@ fn rest_api_region_candidates(sso_region: &str) -> [&'static str; 2] {
     }
 }
 
+/// 从 profileArn 提取区域，例如：
+/// `arn:aws:codewhisperer:eu-central-1:...:profile/...` → `eu-central-1`。
+fn region_from_profile_arn(profile_arn: &str) -> Option<&str> {
+    profile_arn
+        .split(':')
+        .nth(3)
+        .filter(|region| !region.trim().is_empty())
+}
+
+/// REST API 候选区域：真实 profileArn 的区域优先，其次按 SSO/auth region 回退。
+fn rest_api_region_candidates_for_credentials(
+    credentials: &KiroCredentials,
+    config: &Config,
+) -> [&'static str; 2] {
+    if let Some(profile_region) = credentials
+        .effective_profile_arn()
+        .and_then(region_from_profile_arn)
+    {
+        if profile_region == "eu-central-1" || profile_region.starts_with("eu-") {
+            return ["eu-central-1", "us-east-1"];
+        }
+        if profile_region == "us-east-1" {
+            return ["us-east-1", "eu-central-1"];
+        }
+    }
+
+    rest_api_region_candidates(credentials.effective_auth_region(config))
+}
+
 /// 获取使用额度信息
 pub(crate) async fn get_usage_limits(
     credentials: &KiroCredentials,
@@ -351,24 +380,17 @@ pub(crate) async fn get_usage_limits(
 ) -> anyhow::Result<UsageLimitsResponse> {
     tracing::debug!("正在获取使用额度信息...");
 
-    // getUsageLimits 仅在 us-east-1 / eu-central-1 提供服务，
-    // 依据凭据 SSO 区域选择主端点，403 时回退到另一个端点。
-    let sso_region = credentials.effective_auth_region(config);
-    let candidates = rest_api_region_candidates(sso_region);
+    let candidates = rest_api_region_candidates_for_credentials(credentials, config);
     let machine_id = machine_id::generate_from_credentials(credentials, config);
-    // 用量类接口固定用 USAGE_API_KIRO_VERSION：新版 IDE 会强制要求 profileArn，
-    // 对 Enterprise/IdC 账号失败；该版本无需 profileArn。
     let kiro_version = USAGE_API_KIRO_VERSION;
     let os_name = &config.system_version;
     let node_version = &config.node_version;
 
-    // profileArn 查询串：仅发送真实 ARN，跳过 BuilderID 占位符
-    let profile_arn_query = credentials
-        .effective_profile_arn()
-        .map(|arn| format!("&profileArn={}", urlencoding::encode(arn)))
-        .unwrap_or_default();
+    // 真实 profileArn 只放 header，不放 query。
+    // 实测 eu-central-1 + CLI 可用 profile 若使用 ?profileArn=... 会返回 400/403；
+    // x-amzn-kiro-profile-arn header 可正常刷新额度。
+    let profile_arn_header = credentials.effective_profile_arn().map(str::to_string);
 
-    // 构建 User-Agent headers
     let user_agent = format!(
         "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
         os_name, node_version, kiro_version, machine_id
@@ -381,8 +403,8 @@ pub(crate) async fn get_usage_limits(
     for (idx, region) in candidates.iter().enumerate() {
         let host = format!("q.{}.amazonaws.com", region);
         let url = format!(
-            "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true{}",
-            host, profile_arn_query
+            "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true",
+            host
         );
 
         let mut request = client
@@ -395,12 +417,14 @@ pub(crate) async fn get_usage_limits(
             .header("Authorization", format!("Bearer {}", token))
             .header("Connection", "close");
 
+        if let Some(arn) = profile_arn_header.as_deref() {
+            request = request.header("x-amzn-kiro-profile-arn", arn);
+        }
         if credentials.is_api_key_credential() {
             request = request.header("tokentype", "API_KEY");
         }
 
         let response = request.send().await?;
-
         let status = response.status();
         if status.is_success() {
             let data: UsageLimitsResponse = response.json().await?;
@@ -408,8 +432,6 @@ pub(crate) async fn get_usage_limits(
         }
 
         let body_text = response.text().await.unwrap_or_default();
-
-        // 403 且仍有备用端点时，尝试下一个区域端点（Enterprise/IdC 跨区兼容）
         if status.as_u16() == 403 && idx + 1 < candidates.len() {
             tracing::debug!(
                 "getUsageLimits 在 {} 返回 403，尝试备用端点 {}",
@@ -430,7 +452,6 @@ pub(crate) async fn get_usage_limits(
         bail!("{}: {} {}", error_msg, status, body_text);
     }
 
-    // 所有候选端点均失败（理论上循环内已 return / bail，此处为兜底）
     bail!(
         "权限不足，无法获取使用额度: {}",
         last_error.unwrap_or_else(|| "无可用端点".to_string())
@@ -450,22 +471,13 @@ pub(crate) async fn get_available_models(
 ) -> anyhow::Result<ListAvailableModelsResponse> {
     tracing::debug!("正在获取可用模型列表...");
 
-    // ListAvailableModels 仅在 us-east-1 / eu-central-1 提供服务，
-    // 依据凭据 SSO 区域选择主端点，403 时回退到另一个端点。
-    let sso_region = credentials.effective_auth_region(config);
-    let candidates = rest_api_region_candidates(sso_region);
+    let candidates = rest_api_region_candidates_for_credentials(credentials, config);
     let machine_id = machine_id::generate_from_credentials(credentials, config);
     let kiro_version = USAGE_API_KIRO_VERSION;
     let os_name = &config.system_version;
     let node_version = &config.node_version;
+    let profile_arn_header = credentials.effective_profile_arn().map(str::to_string);
 
-    // profileArn 查询串：仅发送真实 ARN，跳过 BuilderID 占位符
-    let profile_arn_query = credentials
-        .effective_profile_arn()
-        .map(|arn| format!("&profileArn={}", urlencoding::encode(arn)))
-        .unwrap_or_default();
-
-    // 构建 User-Agent headers（与 get_usage_limits 保持一致）
     let user_agent = format!(
         "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
         os_name, node_version, kiro_version, machine_id
@@ -477,10 +489,7 @@ pub(crate) async fn get_available_models(
     let mut last_error: Option<String> = None;
     for (idx, region) in candidates.iter().enumerate() {
         let host = format!("q.{}.amazonaws.com", region);
-        let url = format!(
-            "https://{}/ListAvailableModels?origin=AI_EDITOR{}",
-            host, profile_arn_query
-        );
+        let url = format!("https://{}/ListAvailableModels?origin=AI_EDITOR", host);
 
         let mut request = client
             .get(&url)
@@ -492,12 +501,14 @@ pub(crate) async fn get_available_models(
             .header("Authorization", format!("Bearer {}", token))
             .header("Connection", "close");
 
+        if let Some(arn) = profile_arn_header.as_deref() {
+            request = request.header("x-amzn-kiro-profile-arn", arn);
+        }
         if credentials.is_api_key_credential() {
             request = request.header("tokentype", "API_KEY");
         }
 
         let response = request.send().await?;
-
         let status = response.status();
         if status.is_success() {
             let data: ListAvailableModelsResponse = response.json().await?;
@@ -505,8 +516,6 @@ pub(crate) async fn get_available_models(
         }
 
         let body_text = response.text().await.unwrap_or_default();
-
-        // 403 且仍有备用端点时，尝试下一个区域端点（Enterprise/IdC 跨区兼容）
         if status.as_u16() == 403 && idx + 1 < candidates.len() {
             tracing::debug!(
                 "ListAvailableModels 在 {} 返回 403，尝试备用端点 {}",
@@ -527,7 +536,6 @@ pub(crate) async fn get_available_models(
         bail!("{}: {} {}", error_msg, status, body_text);
     }
 
-    // 所有候选端点均失败（理论上循环内已 return / bail，此处为兜底）
     bail!(
         "权限不足，无法获取可用模型: {}",
         last_error.unwrap_or_else(|| "无可用端点".to_string())
@@ -544,8 +552,10 @@ pub(crate) async fn get_available_models(
 /// `x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles`，
 /// `Content-Type: application/x-amz-json-1.0`，Body `{"maxResults":N}`。
 ///
-/// 与 [`get_usage_limits`] 一样仅在 `us-east-1` / `eu-central-1` 提供服务，
-/// 依据凭据 SSO 区域选择主端点，主端点未返回 profile 时回退到另一个端点。
+/// 与 [`get_usage_limits`] 一样仅在 `us-east-1` / `eu-central-1` 提供服务。
+///
+/// 注意：同一个 Enterprise / IdC 账号可能在两个区域端点分别返回不同 profile，
+/// 不能在第一个非空区域提前返回；必须遍历所有候选区域并按 ARN 合并去重。
 pub(crate) async fn list_available_profiles(
     credentials: &KiroCredentials,
     config: &Config,
@@ -570,52 +580,96 @@ pub(crate) async fn list_available_profiles(
     let client = build_client(proxy, 60, config.tls_backend)?;
 
     let mut last_error: Option<String> = None;
-    let mut empty_seen = false;
+    let mut successful_empty_seen = false;
+    let mut merged_profiles: Vec<AvailableProfile> = Vec::new();
+    let mut seen_arns: HashSet<String> = HashSet::new();
+
     for region in candidates.iter() {
         let host = format!("q.{}.amazonaws.com", region);
         let url = format!("https://{}/", host);
+        let mut next_token: Option<String> = None;
 
-        let mut request = client
-            .post(&url)
-            .header("content-type", "application/x-amz-json-1.0")
-            .header(
-                "x-amz-target",
-                "AmazonCodeWhispererService.ListAvailableProfiles",
-            )
-            .header("x-amz-user-agent", &amz_user_agent)
-            .header("user-agent", &user_agent)
-            .header("host", &host)
-            .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
-            .header("amz-sdk-request", "attempt=1; max=1")
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Connection", "close")
-            .body(r#"{"maxResults":10}"#);
+        loop {
+            let body = match next_token.as_deref() {
+                Some(t) if !t.trim().is_empty() => serde_json::json!({
+                    "maxResults": 10,
+                    "nextToken": t,
+                })
+                .to_string(),
+                _ => r#"{"maxResults":10}"#.to_string(),
+            };
 
-        if credentials.is_api_key_credential() {
-            request = request.header("tokentype", "API_KEY");
-        }
+            let mut request = client
+                .post(&url)
+                .header("content-type", "application/x-amz-json-1.0")
+                .header(
+                    "x-amz-target",
+                    "AmazonCodeWhispererService.ListAvailableProfiles",
+                )
+                .header("x-amz-user-agent", &amz_user_agent)
+                .header("user-agent", &user_agent)
+                .header("host", &host)
+                .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+                .header("amz-sdk-request", "attempt=1; max=1")
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Connection", "close")
+                .body(body);
 
-        let response = request.send().await?;
-        let status = response.status();
-
-        if status.is_success() {
-            let data: ListAvailableProfilesResponse = response.json().await?;
-            // 该区域无 profile 时尝试另一个区域端点（账号可能在 eu-central-1）
-            if data.first_arn().is_none() {
-                empty_seen = true;
-                continue;
+            if credentials.is_api_key_credential() {
+                request = request.header("tokentype", "API_KEY");
             }
-            return Ok(data);
-        }
 
-        let body_text = response.text().await.unwrap_or_default();
-        last_error = Some(format!("{} {}", status, body_text));
-        // 403 等错误继续尝试下一个候选端点
+            let response = request.send().await?;
+            let status = response.status();
+
+            if status.is_success() {
+                let data: ListAvailableProfilesResponse = response.json().await?;
+                if data.first_arn().is_none() {
+                    successful_empty_seen = true;
+                }
+
+                for profile in data.profiles {
+                    let Some(arn) = profile
+                        .arn
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|arn| !arn.is_empty())
+                    else {
+                        continue;
+                    };
+                    if seen_arns.insert(arn.to_string()) {
+                        merged_profiles.push(profile);
+                    }
+                }
+
+                next_token = data.next_token.filter(|t| !t.trim().is_empty());
+                if next_token.is_some() {
+                    continue;
+                }
+                break;
+            }
+
+            let body_text = response.text().await.unwrap_or_default();
+            last_error = Some(format!("{} {}", status, body_text));
+            tracing::debug!(
+                "ListAvailableProfiles 在 {} 返回 {}，继续尝试其它候选端点",
+                region,
+                last_error.as_deref().unwrap_or_default()
+            );
+            break;
+        }
+    }
+
+    if !merged_profiles.is_empty() {
+        return Ok(ListAvailableProfilesResponse {
+            profiles: merged_profiles,
+            next_token: None,
+        });
     }
 
     // 没有任何端点返回 profile：若至少有一次成功但为空，视为"该账号无 Enterprise profile"
     // （BuilderID 等），返回空结果让调用方回退到占位符逻辑。
-    if empty_seen {
+    if successful_empty_seen {
         return Ok(ListAvailableProfilesResponse::default());
     }
 
@@ -638,10 +692,9 @@ pub(crate) async fn set_user_preference(
 ) -> anyhow::Result<()> {
     tracing::debug!("正在设置用户偏好 overageStatus={}", overage_status);
 
-    // setUserPreference 仅在 us-east-1 / eu-central-1 提供服务，
-    // 依据凭据 SSO 区域选择主端点，403 时回退到另一个端点。
-    let sso_region = credentials.effective_auth_region(config);
-    let candidates = rest_api_region_candidates(sso_region);
+    // setUserPreference 仅在 us-east-1 / eu-central-1 提供服务。
+    // 若已有真实 profileArn，优先使用 ARN 所属区域；否则按 SSO/auth region 回退。
+    let candidates = rest_api_region_candidates_for_credentials(credentials, config);
     let machine_id = machine_id::generate_from_credentials(credentials, config);
     let kiro_version = USAGE_API_KIRO_VERSION;
     let os_name = &config.system_version;
@@ -755,6 +808,12 @@ struct CredentialEntry {
     /// `Some(t)` 且 `t > now()` 时视为不可用；`t <= now()` 时自动恢复。
     /// 不持久化，进程重启后清空。
     throttled_until: Option<Instant>,
+    /// 当前正在使用该凭据的上游请求数（实时并发，不持久化）
+    in_flight: u64,
+    /// 进程启动后观测到的最高实时并发（不持久化）
+    peak_in_flight: u64,
+    /// 最近一次 429 / 账号风控发生时观测到的并发（不持久化）
+    last_throttle_in_flight: Option<u64>,
 }
 
 /// 禁用原因
@@ -807,6 +866,9 @@ pub struct CredentialEntrySnapshot {
     pub provider: Option<String>,
     /// 是否有 Profile ARN
     pub has_profile_arn: bool,
+    /// Profile ARN（用于 Enterprise / IdC 多 profile 展示与排查）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
     /// Token 过期时间
     pub expires_at: Option<String>,
     /// refreshToken 的 SHA-256 哈希（仅 OAuth 凭据，用于前端去重）
@@ -821,6 +883,12 @@ pub struct CredentialEntrySnapshot {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 当前正在使用该凭据的上游请求数（实时并发）
+    pub in_flight: u64,
+    /// 进程启动后观测到的最高实时并发
+    pub peak_in_flight: u64,
+    /// 最近一次 429 / 账号风控发生时观测到的并发
+    pub last_throttle_in_flight: Option<u64>,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
     /// 代理 URL（用于前端展示）
@@ -902,6 +970,23 @@ pub struct CallContext {
     pub token: String,
 }
 
+
+/// 上游实时调用 guard，确保请求结束、失败或提前 return 时扣减 in_flight。
+pub struct InFlightGuard {
+    manager: std::sync::Arc<MultiTokenManager>,
+    id: u64,
+    active: bool,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.manager.end_in_flight(self.id);
+            self.active = false;
+        }
+    }
+}
+
 impl MultiTokenManager {
     /// 创建多凭据 Token 管理器
     ///
@@ -959,6 +1044,9 @@ impl MultiTokenManager {
                     success_count: 0,
                     last_used_at: None,
                     throttled_until: None,
+                    in_flight: 0,
+                    peak_in_flight: 0,
+                    last_throttle_in_flight: None,
                 }
             })
             .collect();
@@ -1335,11 +1423,28 @@ impl MultiTokenManager {
                     anyhow::bail!("刷新后的 Token 仍然无效或已过期");
                 }
 
-                // 更新凭据
+                // 更新凭据；同一 refreshToken 拆出的多 profile 副本也同步 token rotation，
+                // 但保留各自 profileArn / id / priority / proxy 等本地元数据。
+                let old_refresh_token_hash = current_creds.refresh_token.as_deref().map(sha256_hex);
                 {
                     let mut entries = self.entries.lock();
-                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                        entry.credentials = new_creds.clone();
+                    for entry in entries.iter_mut() {
+                        let same_source = old_refresh_token_hash
+                            .as_deref()
+                            .and_then(|h| {
+                                entry
+                                    .credentials
+                                    .refresh_token
+                                    .as_deref()
+                                    .map(|rt| sha256_hex(rt) == h)
+                            })
+                            .unwrap_or(entry.id == id);
+                        if same_source {
+                            entry.credentials.access_token = new_creds.access_token.clone();
+                            entry.credentials.refresh_token = new_creds.refresh_token.clone();
+                            entry.credentials.expires_at = new_creds.expires_at.clone();
+                            entry.refresh_failure_count = 0;
+                        }
                     }
                 }
 
@@ -1640,6 +1745,35 @@ impl MultiTokenManager {
 
         if should_flush {
             self.save_stats();
+        }
+    }
+
+
+    /// 标记某凭据开始一次上游调用，返回 RAII guard；guard drop 时自动扣减。
+    pub fn begin_in_flight(self: &std::sync::Arc<Self>, id: u64) -> InFlightGuard {
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.in_flight = entry.in_flight.saturating_add(1);
+                entry.peak_in_flight = entry.peak_in_flight.max(entry.in_flight);
+            }
+        }
+        InFlightGuard { manager: std::sync::Arc::clone(self), id, active: true }
+    }
+
+    pub fn mark_throttle_observed(&self, id: u64) -> Option<u64> {
+        let mut entries = self.entries.lock();
+        entries.iter_mut().find(|e| e.id == id).map(|entry| {
+            let observed = entry.in_flight;
+            entry.last_throttle_in_flight = Some(observed);
+            observed
+        })
+    }
+
+    fn end_in_flight(&self, id: u64) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
         }
     }
 
@@ -1980,6 +2114,7 @@ impl MultiTokenManager {
                         e.credentials.provider.clone()
                     },
                     has_profile_arn: e.credentials.profile_arn.is_some(),
+                    profile_arn: e.credentials.profile_arn.clone(),
                     expires_at: if e.credentials.is_api_key_credential() {
                         None // API Key 凭据本地不维护过期时间（服务端策略未知）
                     } else {
@@ -2003,6 +2138,9 @@ impl MultiTokenManager {
                     email: e.credentials.email.clone(),
                     success_count: e.success_count,
                     last_used_at: e.last_used_at.clone(),
+                    in_flight: e.in_flight,
+                    peak_in_flight: e.peak_in_flight,
+                    last_throttle_in_flight: e.last_throttle_in_flight,
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
                     refresh_failure_count: e.refresh_failure_count,
@@ -2086,7 +2224,10 @@ impl MultiTokenManager {
                 .iter()
                 .filter(|e| {
                     !e.disabled
-                        && !e.throttled_until.map(|t| t > throttled_now).unwrap_or(false)
+                        && !e
+                            .throttled_until
+                            .map(|t| t > throttled_now)
+                            .unwrap_or(false)
                 })
                 .count()
         }
@@ -2189,6 +2330,167 @@ impl MultiTokenManager {
         }
         self.save_stats();
         Ok(count)
+    }
+
+    /// 查询指定凭据可用的 Enterprise / IdC profiles。
+    pub async fn list_available_profiles_for(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<ListAvailableProfilesResponse> {
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+
+        if credentials.is_api_key_credential() {
+            return Ok(ListAvailableProfilesResponse::default());
+        }
+
+        let ctx = self.try_ensure_token(id, &credentials).await?;
+        let global_proxy = self.proxy.lock().clone();
+        let effective_proxy = ctx.credentials.effective_proxy(global_proxy.as_ref());
+        list_available_profiles(
+            &ctx.credentials,
+            &self.config,
+            &ctx.token,
+            effective_proxy.as_ref(),
+        )
+        .await
+    }
+
+    /// 扫描指定凭据的可用 profiles，并按 profileArn 自动补齐缺失凭据。
+    ///
+    /// 设计：不新增复杂关系表；同一账号不同 profile 直接存为多条凭据，
+    /// 每条凭据只差 profileArn/id，现有调度、失败计数、余额检查可以原样复用。
+    pub async fn expand_profiles_for(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(Vec<AvailableProfile>, Vec<u64>, Vec<String>)> {
+        use crate::kiro::model::credentials::is_placeholder_profile_arn;
+
+        let base = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+
+        if base.is_api_key_credential() {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        let profiles = self.list_available_profiles_for(id).await?;
+        let real_profiles: Vec<AvailableProfile> = profiles
+            .profiles
+            .into_iter()
+            .filter(|p| {
+                p.arn
+                    .as_deref()
+                    .map(|a| !a.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if real_profiles.is_empty() {
+            return Ok((real_profiles, Vec::new(), Vec::new()));
+        }
+
+        let base_refresh_hash = base.refresh_token.as_deref().map(sha256_hex);
+        let mut created_ids = Vec::new();
+        let mut existing_arns: HashSet<String> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|e| match base_refresh_hash.as_deref() {
+                    Some(h) => e
+                        .credentials
+                        .refresh_token
+                        .as_deref()
+                        .map(|rt| sha256_hex(rt) == h)
+                        .unwrap_or(false),
+                    None => e.id == id,
+                })
+                .filter_map(|e| e.credentials.profile_arn.clone())
+                .filter(|arn| !is_placeholder_profile_arn(arn) && !arn.trim().is_empty())
+                .collect()
+        };
+
+        // 若原凭据无真实 profileArn，先把第一个真实 profile 回填到原凭据。
+        let base_needs_profile = base
+            .profile_arn
+            .as_deref()
+            .map(|arn| is_placeholder_profile_arn(arn) || arn.trim().is_empty())
+            .unwrap_or(true);
+        if base_needs_profile {
+            if let Some(first_arn) = real_profiles.first().and_then(|p| p.arn.clone()) {
+                {
+                    let mut entries = self.entries.lock();
+                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                        entry.credentials.profile_arn = Some(first_arn.clone());
+                    }
+                }
+                existing_arns.insert(first_arn);
+            }
+        }
+
+        for profile in &real_profiles {
+            let Some(arn) = profile
+                .arn
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if existing_arns.contains(arn) {
+                continue;
+            }
+
+            let new_id = {
+                let entries = self.entries.lock();
+                entries.iter().map(|e| e.id).max().unwrap_or(0) + 1
+            };
+            let mut new_cred = base.clone();
+            new_cred.id = Some(new_id);
+            new_cred.profile_arn = Some(arn.to_string());
+
+            {
+                let mut entries = self.entries.lock();
+                entries.push(CredentialEntry {
+                    id: new_id,
+                    credentials: new_cred,
+                    failure_count: 0,
+                    total_failure_count: 0,
+                    refresh_failure_count: 0,
+                    disabled: false,
+                    disabled_reason: None,
+                    success_count: 0,
+                    last_used_at: None,
+                    throttled_until: None,
+                    in_flight: 0,
+                    peak_in_flight: 0,
+                    last_throttle_in_flight: None,
+                });
+            }
+            existing_arns.insert(arn.to_string());
+            created_ids.push(new_id);
+        }
+
+        self.is_multiple_format.store(true, Ordering::Relaxed);
+        self.persist_credentials()?;
+
+        let profile_arns = real_profiles
+            .iter()
+            .filter_map(|p| p.arn.clone())
+            .filter(|arn| !arn.trim().is_empty())
+            .collect();
+        Ok((real_profiles, created_ids, profile_arns))
     }
 
     /// 解析并回填 Enterprise / IdC 账号的真实 profileArn。
@@ -2403,10 +2705,7 @@ impl MultiTokenManager {
     /// 复用 [`Self::get_usage_limits_for`] 的 token 准备流程：API Key 凭据直接用
     /// kiroApiKey；OAuth 凭据按需在 `refresh_lock` 内刷新并持久化。返回的凭据是
     /// 刷新后重新读取的最新快照，调用方据此构造请求。
-    async fn prepare_request_token(
-        &self,
-        id: u64,
-    ) -> anyhow::Result<(String, KiroCredentials)> {
+    async fn prepare_request_token(&self, id: u64) -> anyhow::Result<(String, KiroCredentials)> {
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2641,20 +2940,35 @@ impl MultiTokenManager {
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("缺少 refreshToken"))?;
             let new_refresh_token_hash = sha256_hex(new_refresh_token);
+            let new_profile_arn = new_cred
+                .profile_arn
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
             let duplicate_exists = {
                 let entries = self.entries.lock();
                 entries.iter().any(|entry| {
-                    entry
+                    let same_refresh = entry
                         .credentials
                         .refresh_token
                         .as_deref()
                         .map(sha256_hex)
                         .as_deref()
-                        == Some(new_refresh_token_hash.as_str())
+                        == Some(new_refresh_token_hash.as_str());
+                    if !same_refresh {
+                        return false;
+                    }
+                    let existing_profile_arn = entry
+                        .credentials
+                        .profile_arn
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    existing_profile_arn == new_profile_arn
                 })
             };
             if duplicate_exists {
-                anyhow::bail!("凭据已存在（refreshToken 重复）");
+                anyhow::bail!("凭据已存在（refreshToken + profileArn 重复）");
             }
         }
 
@@ -2714,6 +3028,9 @@ impl MultiTokenManager {
                 success_count: 0,
                 last_used_at: None,
                 throttled_until: None,
+                in_flight: 0,
+                peak_in_flight: 0,
+                last_throttle_in_flight: None,
             });
         }
 
@@ -2727,7 +3044,7 @@ impl MultiTokenManager {
 
     /// 更新凭据的可编辑字段（Admin API）
     ///
-    /// 支持更新 email、proxy_url、proxy_username、proxy_password。
+    /// 支持更新 email、proxy_url、proxy_username、proxy_password、profile_arn。
     /// 传 `None` 表示不修改该字段，传 `Some("")` 表示清除该字段。
     pub fn update_credential(
         &self,
@@ -2736,6 +3053,7 @@ impl MultiTokenManager {
         proxy_url: Option<Option<String>>,
         proxy_username: Option<Option<String>>,
         proxy_password: Option<Option<String>>,
+        profile_arn: Option<Option<String>>,
     ) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();
@@ -2755,6 +3073,9 @@ impl MultiTokenManager {
             }
             if let Some(v) = proxy_password {
                 entry.credentials.proxy_password = v.filter(|s| !s.is_empty());
+            }
+            if let Some(v) = profile_arn {
+                entry.credentials.profile_arn = v.filter(|s| !s.is_empty());
             }
         }
         self.persist_credentials()?;
@@ -2912,12 +3233,27 @@ impl MultiTokenManager {
         let effective_proxy = credentials.effective_proxy(global_proxy.as_ref());
         let new_creds = refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await?;
 
-        // 更新 entries 中对应凭据
+        // 更新 entries；同一 refreshToken 拆出的多 profile 副本同步 token rotation。
+        let old_refresh_token_hash = credentials.refresh_token.as_deref().map(sha256_hex);
         {
             let mut entries = self.entries.lock();
-            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.credentials = new_creds;
-                entry.refresh_failure_count = 0;
+            for entry in entries.iter_mut() {
+                let same_source = old_refresh_token_hash
+                    .as_deref()
+                    .and_then(|h| {
+                        entry
+                            .credentials
+                            .refresh_token
+                            .as_deref()
+                            .map(|rt| sha256_hex(rt) == h)
+                    })
+                    .unwrap_or(entry.id == id);
+                if same_source {
+                    entry.credentials.access_token = new_creds.access_token.clone();
+                    entry.credentials.refresh_token = new_creds.refresh_token.clone();
+                    entry.credentials.expires_at = new_creds.expires_at.clone();
+                    entry.refresh_failure_count = 0;
+                }
             }
         }
 
@@ -3035,7 +3371,11 @@ impl MultiTokenManager {
         Ok(())
     }
 
-    fn persist_account_throttle_config(&self, failover: bool, cooldown_secs: u64) -> anyhow::Result<()> {
+    fn persist_account_throttle_config(
+        &self,
+        failover: bool,
+        cooldown_secs: u64,
+    ) -> anyhow::Result<()> {
         use anyhow::Context;
 
         let config_path = match self.config.config_path() {

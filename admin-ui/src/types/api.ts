@@ -19,12 +19,19 @@ export interface CredentialStatusItem {
   authMethod: string | null
   provider?: string | null
   hasProfileArn: boolean
+  profileArn?: string | null
   email?: string
   refreshTokenHash?: string
   apiKeyHash?: string
   maskedApiKey?: string
   successCount: number
   lastUsedAt: string | null
+  /** 当前正在使用该凭据的上游请求数（实时并发） */
+  inFlight: number
+  /** 进程启动后观测到的最高实时并发 */
+  peakInFlight: number
+  /** 最近一次 429 / 风控触发时观测到的并发 */
+  lastThrottleInFlight?: number | null
   hasProxy: boolean
   proxyUrl?: string
   refreshFailureCount: number
@@ -67,6 +74,16 @@ export interface AvailableModelItem {
   modelName?: string
   description?: string
   maxInputTokens?: number
+}
+
+// Profile 扫描与自动补齐响应
+export interface ExpandProfilesResponse {
+  success: boolean
+  credentialId: number
+  profiles: Array<{ arn?: string | null; profileName?: string | null }>
+  profileArns: string[]
+  createdIds: number[]
+  message: string
 }
 
 // 成功响应
@@ -129,6 +146,7 @@ export interface UpdateCredentialRequest {
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  profileArn?: string
 }
 
 // 更新 refreshToken 请求
@@ -496,5 +514,22 @@ export interface FailureStats {
   other: number
 }
 
+/** 最近窗口内单凭据调用概况 */
+export interface RecentStats {
+  total: number
+  success: number
+  error: number
+  attempts: number
+  failedAttempts: number
+  throttle429: number
+  avgMs: number
+  maxMs: number
+  maxAttemptMs: number
+  endpoints: string[]
+}
+
 /** credentialId(字符串) → 失败分类计数 */
 export type FailureStatsMap = Record<string, FailureStats>
+
+/** credentialId(字符串) → 最近调用概况 */
+export type RecentStatsMap = Record<string, RecentStats>

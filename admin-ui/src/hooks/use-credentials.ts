@@ -28,7 +28,7 @@ export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
-    refetchInterval: 30000, // 每 30 秒刷新一次
+    refetchInterval: 3000, // 需要展示实时并发，短间隔刷新
   })
 }
 

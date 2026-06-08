@@ -226,10 +226,10 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
       setResults(initialResults)
 
       // 3. 检测重复：OAuth 与 API Key 分别使用对应的 hash 集合
-      const existingOauthHashes = new Set(
+      const existingOauthKeys = new Set(
         existingCredentials?.credentials
-          .map(c => c.refreshTokenHash)
-          .filter((hash): hash is string => Boolean(hash)) || []
+          .map(c => c.refreshTokenHash ? `${c.refreshTokenHash}:${(c.profileArn || '').trim()}` : '')
+          .filter((key): key is string => Boolean(key)) || []
       )
       const existingApiKeyHashes = new Set(
         existingCredentials?.credentials
@@ -318,9 +318,11 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             continue
           }
           credHash = await sha256Hex(token)
-          if (existingOauthHashes.has(credHash)) {
+          const profileKey = cred.profileArn?.trim() || ''
+          const duplicateKey = `${credHash}:${profileKey}`
+          if (existingOauthKeys.has(duplicateKey)) {
             duplicateCount++
-            const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === credHash)
+            const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === credHash && ((c.profileArn || '').trim() === profileKey))
             setResults(prev => {
               const newResults = [...prev]
               newResults[i] = {
@@ -436,7 +438,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           // 验活成功
           const oauthDisplayEmail = addedCred.email || cred.email?.trim() || undefined
           successCount++
-          existingOauthHashes.add(credHash)
+          existingOauthKeys.add(`${credHash}:${cred.profileArn?.trim() || ''}`)
           setCurrentProcessing(oauthDisplayEmail ? `验活成功: ${oauthDisplayEmail}` : `验活成功: 凭据 ${i + 1}`)
           setResults(prev => {
             const newResults = [...prev]

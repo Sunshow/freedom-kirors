@@ -39,6 +39,7 @@ export function EditCredentialDialog({
   const [proxyUrl, setProxyUrl] = useState(credential.proxyUrl ?? '')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  const [profileArn, setProfileArn] = useState(credential.profileArn ?? '')
   const [manualMode, setManualMode] = useState(false)
 
   const { data: proxyPool } = useQuery({
@@ -54,6 +55,7 @@ export function EditCredentialDialog({
       setProxyUrl(credential.proxyUrl ?? '')
       setProxyUsername('')
       setProxyPassword('')
+      setProfileArn(credential.profileArn ?? '')
       setManualMode(false)
     }
   }, [open, credential])
@@ -71,6 +73,7 @@ export function EditCredentialDialog({
           proxyUrl: proxyUrl,
           proxyUsername: proxyUsername || undefined,
           proxyPassword: proxyPassword || undefined,
+          profileArn,
         },
       },
       {
@@ -122,6 +125,25 @@ export function EditCredentialDialog({
               />
               <p className="text-xs text-muted-foreground">
                 留空则显示凭据 ID，清除请提交空值
+              </p>
+            </div>
+
+
+            {/* Profile ARN 快速切换 */}
+            <div className="space-y-2">
+              <label htmlFor="profileArn" className="text-sm font-medium">
+                Profile ARN（快速切换 Enterprise / IdC profile）
+              </label>
+              <Input
+                id="profileArn"
+                placeholder="arn:aws:codewhisperer:us-east-1:...:profile/..."
+                value={profileArn}
+                onChange={(e) => setProfileArn(e.target.value)}
+                disabled={isPending}
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                只切换 profile 时改这里即可；留空保存可清除。区域会按 ARN 自动选择。
               </p>
             </div>
 

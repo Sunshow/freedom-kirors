@@ -91,8 +91,9 @@ fn get_cache_control(path: &str) -> &'static str {
         // HTML 文件不缓存，确保用户获取最新版本
         "no-cache"
     } else if path.starts_with("assets/") {
-        // assets/ 目录下的文件带有内容哈希，可以长期缓存
-        "public, max-age=31536000, immutable"
+        // 管理后台经常现场热修，Telegram/移动浏览器对 immutable 缓存很顽固。
+        // 这里宁可少缓存一点，也要确保用户刷新后能拿到最新前端。
+        "no-cache, must-revalidate"
     } else {
         // 其他文件（如 favicon）使用较短的缓存
         "public, max-age=3600"

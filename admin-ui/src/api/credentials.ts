@@ -4,6 +4,7 @@ import type {
   CredentialsStatusResponse,
   BalanceResponse,
   AvailableModelsResponse,
+  ExpandProfilesResponse,
   SuccessResponse,
   SetDisabledRequest,
   SetPriorityRequest,
@@ -153,6 +154,12 @@ export async function getCredentialBalance(id: number): Promise<BalanceResponse>
 // 获取凭据当前可用的模型列表（按需实时查询上游）
 export async function getCredentialModels(id: number): Promise<AvailableModelsResponse> {
   const { data } = await api.get<AvailableModelsResponse>(`/credentials/${id}/models`)
+  return data
+}
+
+// 扫描并自动补齐某凭据的可用 profiles
+export async function expandCredentialProfiles(id: number): Promise<ExpandProfilesResponse> {
+  const { data } = await api.post<ExpandProfilesResponse>(`/credentials/${id}/profiles/expand`)
   return data
 }
 

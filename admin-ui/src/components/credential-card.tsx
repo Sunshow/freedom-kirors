@@ -38,7 +38,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { CredentialStatusItem, BalanceResponse } from "@/types/api";
+import type { CredentialStatusItem, BalanceResponse, RecentStats } from "@/types/api";
 import { maskProxyUrl, extractErrorMessage, overageFailureMessage } from "@/lib/utils";
 import {
   useSetDisabled,
@@ -68,6 +68,8 @@ interface CredentialCardProps {
   onRefreshBalance: () => void;
   /** 该凭据的失败分类计数（来自 trace 聚合）；无数据时回退 totalFailureCount */
   failureStats?: { auth: number; throttle: number; other: number };
+  /** 最近 1 小时调用概况（来自 trace 聚合），用于显示压测/并发健康度 */
+  recentStats?: RecentStats;
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
@@ -94,6 +96,12 @@ function formatNumber(n: number): string {
 function formatResetDate(ts: number | null): string {
   if (!ts) return "未知";
   return new Date(ts * 1000).toLocaleString("zh-CN");
+}
+
+function formatMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
 }
 
 /** 把秒数格式化为 `mm:ss` 或 `hh:mm:ss` */
@@ -192,6 +200,7 @@ export function CredentialCard({
   loadingBalance,
   onRefreshBalance,
   failureStats,
+  recentStats,
 }: CredentialCardProps) {
   const [editingPriority, setEditingPriority] = useState(false);
   const [priorityValue, setPriorityValue] = useState(
@@ -563,6 +572,31 @@ export function CredentialCard({
               </dd>
             </div>
             <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted-foreground">当前并发</dt>
+              <dd>
+                <Badge
+                  variant={credential.inFlight > 0 ? "default" : "outline"}
+                  className="tabular-nums"
+                >
+                  RAM {credential.inFlight}
+                </Badge>
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted-foreground">最高并发</dt>
+              <dd className="font-medium tabular-nums">
+                RAM {credential.peakInFlight ?? 0}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-muted-foreground">限流并发</dt>
+              <dd className="font-medium tabular-nums text-amber-600 dark:text-amber-400">
+                {credential.lastThrottleInFlight != null
+                  ? `RAM ${credential.lastThrottleInFlight}`
+                  : "-"}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
               <dt className="text-muted-foreground">成功次数</dt>
               <dd>
                 <button
@@ -582,6 +616,51 @@ export function CredentialCard({
                 {formatLastUsed(credential.lastUsedAt)}
               </dd>
             </div>
+            {recentStats && recentStats.total > 0 && (
+              <div className="col-span-2 rounded-lg border border-border/60 bg-secondary/30 p-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-[11px] font-medium text-muted-foreground">
+                    近 1 小时调用 / 压测
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-1">
+                    {recentStats.endpoints.map((endpoint) => (
+                      <Badge key={endpoint} variant="outline" className="px-1.5 py-0 text-[10px]">
+                        {endpoint}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-center text-[11px]">
+                  <div>
+                    <div className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                      {recentStats.success}
+                    </div>
+                    <div className="text-muted-foreground">成功</div>
+                  </div>
+                  <div>
+                    <div className={`font-semibold tabular-nums ${recentStats.error > 0 ? "text-destructive" : "text-muted-foreground"}`}>
+                      {recentStats.error}
+                    </div>
+                    <div className="text-muted-foreground">失败</div>
+                  </div>
+                  <div>
+                    <div className={`font-semibold tabular-nums ${recentStats.throttle429 > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>
+                      {recentStats.throttle429}
+                    </div>
+                    <div className="text-muted-foreground">429</div>
+                  </div>
+                  <div>
+                    <div className="font-semibold tabular-nums">
+                      {formatMs(Math.max(recentStats.maxMs, recentStats.maxAttemptMs))}
+                    </div>
+                    <div className="text-muted-foreground">最长</div>
+                  </div>
+                </div>
+                <div className="mt-2 text-[11px] text-muted-foreground">
+                  总请求 {recentStats.total}，上游尝试 {recentStats.attempts}，失败尝试 {recentStats.failedAttempts}，平均 {formatMs(recentStats.avgMs)}
+                </div>
+              </div>
+            )}
             {credential.maskedApiKey && (
               <div className="col-span-2 flex items-center justify-between gap-2">
                 <dt className="text-muted-foreground">API Key</dt>

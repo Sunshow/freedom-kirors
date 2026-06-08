@@ -24,7 +24,7 @@ impl IdeEndpoint {
     }
 
     fn api_region<'a>(&self, ctx: &'a RequestContext<'_>) -> &'a str {
-        ctx.credentials.effective_api_region(ctx.config)
+        ctx.credentials.effective_streaming_api_region(ctx.config)
     }
 
     fn host(&self, ctx: &RequestContext<'_>) -> String {
@@ -82,6 +82,10 @@ impl KiroEndpoint for IdeEndpoint {
             .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
             .header("amz-sdk-request", "attempt=1; max=3")
             .header("Authorization", format!("Bearer {}", ctx.token));
+
+        if let Some(arn) = ctx.credentials.effective_profile_arn() {
+            req = req.header("x-amzn-kiro-profile-arn", arn);
+        }
 
         if ctx.credentials.is_api_key_credential() {
             req = req.header("tokentype", "API_KEY");

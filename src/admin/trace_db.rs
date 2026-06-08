@@ -496,6 +496,93 @@ impl TraceStore {
         }
         out
     }
+
+    /// 按凭据聚合最近 `window_secs` 秒的调用概况，用于前端卡片展示压测/并发状态。
+    pub fn recent_stats(&self, window_secs: i64) -> std::collections::HashMap<u64, RecentStats> {
+        let conn = self.conn.lock();
+        let cutoff = Utc::now().timestamp().saturating_sub(window_secs.max(1));
+        let mut out: std::collections::HashMap<u64, RecentStats> = std::collections::HashMap::new();
+
+        let mut stmt = match conn.prepare(
+            "SELECT final_credential_id, final_status, COUNT(*), AVG(duration_ms), MAX(duration_ms) \
+             FROM traces \
+             WHERE ts_epoch >= ?1 AND final_credential_id != 0 \
+             GROUP BY final_credential_id, final_status",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("trace recent_stats final prepare 失败: {}", e);
+                return out;
+            }
+        };
+        if let Ok(rows) = stmt.query_map([cutoff], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0) as u64,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (cred, status, cnt, avg_ms, max_ms) = row;
+                let s = out.entry(cred).or_default();
+                s.total += cnt;
+                if status == "success" {
+                    s.success += cnt;
+                } else {
+                    s.error += cnt;
+                }
+                s.avg_ms = avg_ms;
+                s.max_ms = s.max_ms.max(max_ms);
+            }
+        }
+
+        let mut stmt = match conn.prepare(
+            "SELECT a.credential_id, a.endpoint, a.http_status, a.outcome, COUNT(*), MAX(a.duration_ms) \
+             FROM trace_attempts a \
+             JOIN traces t ON t.trace_id = a.trace_id \
+             WHERE t.ts_epoch >= ?1 AND a.credential_id != 0 \
+             GROUP BY a.credential_id, a.endpoint, a.http_status, a.outcome",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("trace recent_stats attempts prepare 失败: {}", e);
+                return out;
+            }
+        };
+        if let Ok(rows) = stmt.query_map([cutoff], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?.map(|v| v as u16),
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? as u64,
+                row.get::<_, Option<i64>>(5)?.unwrap_or(0) as u64,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (cred, endpoint, http_status, outcome, cnt, max_attempt_ms) = row;
+                let s = out.entry(cred).or_default();
+                s.attempts += cnt;
+                s.max_attempt_ms = s.max_attempt_ms.max(max_attempt_ms);
+                if http_status == Some(429)
+                    || outcome == "account_throttled"
+                    || (outcome == "transient" && http_status == Some(429))
+                {
+                    s.throttle_429 += cnt;
+                }
+                if outcome != "success" {
+                    s.failed_attempts += cnt;
+                }
+                if !s.endpoints.iter().any(|e| e == &endpoint) {
+                    s.endpoints.push(endpoint);
+                }
+            }
+        }
+
+        out
+    }
 }
 
 /// 按凭据的失败分类计数（鉴权 / 账号风控 / 其他）
@@ -505,6 +592,22 @@ pub struct FailureStats {
     pub auth: u64,
     pub throttle: u64,
     pub other: u64,
+}
+
+/// 最近窗口内按凭据聚合的调用概况
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentStats {
+    pub total: u64,
+    pub success: u64,
+    pub error: u64,
+    pub attempts: u64,
+    pub failed_attempts: u64,
+    pub throttle_429: u64,
+    pub avg_ms: f64,
+    pub max_ms: u64,
+    pub max_attempt_ms: u64,
+    pub endpoints: Vec<String>,
 }
 
 /// 共享存储句柄
