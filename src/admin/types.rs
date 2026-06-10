@@ -850,12 +850,22 @@ pub struct ExportedCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_url: Option<String>,
     pub expires_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_password: Option<String>,
 }
 
 /// 账号导出文件中的单个账号（嵌套 `Account` 结构）
@@ -875,6 +885,9 @@ pub struct ExportedAccount {
     pub machine_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_arn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub priority: u32,
     pub credentials: ExportedCredentials,
     /// 订阅信息（最小可用结构：type + title）
     pub subscription: serde_json::Value,

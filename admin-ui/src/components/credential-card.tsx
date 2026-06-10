@@ -386,7 +386,7 @@ export function CredentialCard({
         ref={setNodeRef}
         style={dragStyle}
         data-credential-id={credential.id}
-        className={`group flex h-full min-w-0 flex-col ${
+        className={`group flex h-full min-w-0 max-w-full overflow-hidden flex-col ${
           isDragging
             ? "shadow-apple-lg opacity-80"
             : "hover:-translate-y-0.5 hover:shadow-apple-lg"
@@ -634,7 +634,7 @@ export function CredentialCard({
               </dd>
             </div>
             {recentStats && recentStats.total > 0 && (
-              <div className="col-span-2 rounded-lg border border-border/60 bg-secondary/30 p-2.5">
+              <div className="col-span-1 min-[420px]:col-span-2 rounded-lg border border-border/60 bg-secondary/30 p-2.5">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="text-[11px] font-medium text-muted-foreground">
                     近 1 小时请求健康度
@@ -661,7 +661,7 @@ export function CredentialCard({
                     <div className="mt-1 text-muted-foreground">Kiro 官方单次尝试成功率</div>
                   </div>
                 </div>
-                <div className="grid grid-cols-4 gap-2 text-center text-[11px]">
+                <div className="grid grid-cols-2 gap-2 text-center text-[11px] min-[360px]:grid-cols-4">
                   <div>
                     <div className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
                       {recentStats.success}
@@ -782,8 +782,8 @@ export function CredentialCard({
           </div>
 
           {/* 操作区 */}
-          <div className="mt-auto flex flex-col gap-2 border-t border-border/50 pt-3 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
-            <div className="grid grid-cols-3 gap-1 min-[420px]:flex min-[420px]:items-center">
+          <div className="mt-auto grid grid-cols-2 gap-2 border-t border-border/50 pt-3 min-[420px]:flex min-[420px]:flex-col min-[560px]:flex-row min-[560px]:items-center min-[560px]:justify-between">
+            <div className="grid min-w-0 grid-cols-3 gap-1 col-span-2 min-[420px]:col-span-1 min-[420px]:flex min-[420px]:items-center">
               <Button
                 ref={setActivatorNodeRef}
                 size="icon"
@@ -835,7 +835,7 @@ export function CredentialCard({
               </Button>
             </div>
 
-            <div className="grid grid-cols-[1fr_auto] gap-1 min-[420px]:flex min-[420px]:items-center">
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-1 col-span-2 min-[420px]:col-span-1 min-[420px]:flex min-[420px]:items-center">
               <Button
                 size="sm"
                 variant="outline"
@@ -847,7 +847,7 @@ export function CredentialCard({
               </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button size="icon" variant="ghost" title="更多操作">
+                  <Button size="icon" variant="ghost" title="更多操作" className="h-9 w-9 shrink-0">
                     <MoreHorizontal className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>

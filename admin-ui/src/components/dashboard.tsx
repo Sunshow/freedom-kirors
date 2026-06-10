@@ -1018,19 +1018,34 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
     setExportingKam(true);
     try {
       const exportData = await exportKamCredentials(ids);
-      const normalizedAccounts = (exportData.accounts || []).map((account) =>
-        compactObject({
+      const normalizedAccounts = (exportData.accounts || []).map((account) => {
+        const cred = account.credentials ?? {};
+        return compactObject({
           email: account.email,
-          accessToken: account.accessToken,
-          refreshToken: account.refreshToken,
-          clientId: account.clientId,
-          clientSecret: account.clientSecret,
+          nickname: account.nickname,
+          idp: account.idp,
+          userId: account.userId,
           profileArn: account.profileArn,
-          expiresAt: account.expiresAt,
-          region: account.region,
           machineId: account.machineId,
-        }),
-      );
+          endpoint: account.endpoint,
+          priority: account.priority,
+          status: account.status,
+          accessToken: cred.accessToken,
+          refreshToken: cred.refreshToken,
+          clientId: cred.clientId,
+          clientSecret: cred.clientSecret,
+          authMethod: cred.authMethod,
+          provider: cred.provider,
+          region: cred.region,
+          authRegion: cred.authRegion,
+          apiRegion: cred.apiRegion,
+          startUrl: cred.startUrl,
+          expiresAt: cred.expiresAt,
+          proxyUrl: cred.proxyUrl,
+          proxyUsername: cred.proxyUsername,
+          proxyPassword: cred.proxyPassword,
+        });
+      });
       const accountCount = normalizedAccounts.length;
       if (accountCount === 0) {
         toast.warning("勾选的凭据中没有可导出的（缺少 refreshToken）");
@@ -1296,7 +1311,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
         </div>
 
         {/* 统计卡片 */}
-        <div className="mb-5 grid grid-cols-3 gap-2 sm:mb-6 sm:gap-4 md:grid-cols-4">
+        <div className="mb-5 grid grid-cols-2 gap-2 sm:mb-6 sm:grid-cols-3 sm:gap-4 md:grid-cols-4">
           <Card className="hover:shadow-apple-lg hover:-translate-y-0.5">
             <CardContent className="p-3 sm:p-5">
               <div className="text-[11px] font-medium text-muted-foreground sm:text-[13px]">
@@ -1669,7 +1684,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                 </DropdownMenu>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <div className="relative min-w-[240px] flex-1">
+                <div className="relative min-w-0 flex-1 basis-full sm:basis-auto sm:min-w-[240px]">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     value={credentialSearch}
@@ -1773,7 +1788,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                 items={currentPageIds}
                 strategy={rectSortingStrategy}
               >
-                <div className="grid select-none gap-3 sm:gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <div className="grid min-w-0 gap-3 sm:gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-[repeat(auto-fit,minmax(360px,1fr))]">
                   {currentCredentials.map((credential) => (
                     <CredentialCard
                       key={credential.id}

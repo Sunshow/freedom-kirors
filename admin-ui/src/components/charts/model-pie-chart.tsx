@@ -57,7 +57,7 @@ function ModelChartContent({
   total: number
 }) {
   return (
-    <div className="h-[220px] sm:h-[260px]">
+    <div className="h-[220px] min-w-0 sm:h-[260px]">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
@@ -83,7 +83,7 @@ function ModelChartContent({
             formatter={(value: number, _name, item) =>
               formatTooltipValue({ item, total, value })}
           />
-          <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
+          <Legend wrapperStyle={{ fontSize: 11, width: '100%' }} iconSize={8} />
         </PieChart>
       </ResponsiveContainer>
     </div>

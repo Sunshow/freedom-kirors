@@ -51,12 +51,12 @@ function EmptyCredentialChart() {
 
 function CredentialChartContent({ data }: { data: ChartDatum[] }) {
   return (
-    <div className="h-[280px] sm:h-[340px]">
+    <div className="h-[260px] min-w-0 sm:h-[340px]">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 8, right: 8, left: -10, bottom: 52 }}>
+        <BarChart data={data} margin={{ top: 8, right: 4, left: -20, bottom: 52 }}>
           {credentialChartAxes()}
           {credentialChartTooltip()}
-          <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12 }} />
+          <Legend verticalAlign="top" align="center" height={28} wrapperStyle={{ fontSize: 11, width: '100%' }} />
           {credentialChartBars()}
         </BarChart>
       </ResponsiveContainer>
@@ -76,7 +76,7 @@ function credentialChartAxes() {
       interval={0}
       height={64}
     />,
-    <YAxis key="y" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatNumber(v)} width={42} />,
+    <YAxis key="y" tick={{ fontSize: 11 }} tickFormatter={(v: number) => formatNumber(v)} width={34} />,
   ]
 }
 

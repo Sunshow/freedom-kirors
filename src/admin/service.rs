@@ -354,10 +354,15 @@ fn credential_to_export_account(cred: KiroCredentials) -> Option<ExportedAccount
         region: non_empty(cred.region.clone())
             .or_else(|| non_empty(cred.auth_region.clone()))
             .or_else(|| non_empty(cred.api_region.clone())),
+        auth_region: non_empty(cred.auth_region.clone()),
+        api_region: non_empty(cred.api_region.clone()),
         start_url: non_empty(cred.start_url.clone()),
         expires_at: expires_at_ms,
         auth_method,
         provider: provider.clone(),
+        proxy_url: non_empty(cred.proxy_url.clone()),
+        proxy_username: non_empty(cred.proxy_username.clone()),
+        proxy_password: non_empty(cred.proxy_password.clone()),
     };
 
     Some(ExportedAccount {
@@ -367,6 +372,8 @@ fn credential_to_export_account(cred: KiroCredentials) -> Option<ExportedAccount
         idp,
         user_id: None,
         profile_arn,
+        endpoint: non_empty(cred.endpoint.clone()),
+        priority: cred.priority,
         machine_id: non_empty(cred.machine_id),
         credentials,
         subscription,
@@ -2935,6 +2942,13 @@ mod tests {
         cred.auth_method = Some("idc".to_string());
         cred.provider = Some("Enterprise".to_string());
         cred.region = Some("us-east-1".to_string());
+        cred.auth_region = Some("us-east-1".to_string());
+        cred.api_region = Some("eu-west-1".to_string());
+        cred.proxy_url = Some("http://proxy.local:8080".to_string());
+        cred.proxy_username = Some("puser".to_string());
+        cred.proxy_password = Some("ppass".to_string());
+        cred.endpoint = Some("ide".to_string());
+        cred.priority = 7;
         cred.email = Some("e@example.com".to_string());
         cred.expires_at = Some("2026-06-06T00:00:00Z".to_string());
         // 占位符 profileArn 应在导出时被剥离
@@ -2956,6 +2970,19 @@ mod tests {
         assert_eq!(acc.profile_arn, None);
         // 必填的 csrfToken 输出空串
         assert_eq!(acc.credentials.csrf_token, "");
+        // 往返字段：auth_region / api_region 独立保留，不被压扁
+        assert_eq!(acc.credentials.auth_region.as_deref(), Some("us-east-1"));
+        assert_eq!(acc.credentials.api_region.as_deref(), Some("eu-west-1"));
+        // 往返字段：代理配置完整导出
+        assert_eq!(
+            acc.credentials.proxy_url.as_deref(),
+            Some("http://proxy.local:8080")
+        );
+        assert_eq!(acc.credentials.proxy_username.as_deref(), Some("puser"));
+        assert_eq!(acc.credentials.proxy_password.as_deref(), Some("ppass"));
+        // 往返字段：endpoint 与 priority 保留
+        assert_eq!(acc.endpoint.as_deref(), Some("ide"));
+        assert_eq!(acc.priority, 7);
     }
 
     #[test]

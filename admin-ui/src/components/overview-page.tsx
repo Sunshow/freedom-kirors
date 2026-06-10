@@ -254,7 +254,7 @@ function StatsCards({
   ]
 
   return (
-    <div className="mb-6 grid grid-cols-2 gap-3 max-[360px]:grid-cols-1 lg:grid-cols-5">
+    <div className="mb-6 grid grid-cols-2 gap-3 max-[360px]:grid-cols-1 sm:grid-cols-3 lg:grid-cols-5">
       {cards.map((card) => (
         <StatCard key={card.label} meta={card.meta ?? timeText} {...card} />
       ))}
@@ -411,7 +411,7 @@ function PresetRangeButtons({
   onChange: (value: StatsRange) => void
 }) {
   return (
-    <div className="grid grid-cols-3 gap-1 rounded-md border border-border/60 p-0.5 lg:flex lg:items-center">
+    <div className="grid grid-cols-2 gap-1 rounded-md border border-border/60 p-0.5 sm:grid-cols-3 lg:flex lg:items-center">
       {RANGES.map((r) => (
         <Button
           key={r.value}
@@ -464,7 +464,7 @@ function DateRangeInputs({
   startDate: string
 }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 max-[374px]:grid-cols-1 lg:flex lg:items-center">
+    <div className="grid grid-cols-1 gap-2 min-[375px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-[375px]:items-center lg:flex lg:items-center">
       <DateInput value={startDate} onChange={onStartDateChange} />
       <span className="text-center text-xs text-muted-foreground max-[374px]:hidden">至</span>
       <DateInput value={endDate} onChange={onEndDateChange} />
@@ -504,7 +504,7 @@ function DistributionPanels({
   timeText: string
 }) {
   return (
-    <div className="mb-6 grid gap-4 lg:grid-cols-2">
+    <div className="mb-6 grid min-w-0 gap-4 lg:grid-cols-2">
       <ModelPanel data={byModel} timeText={timeText} />
       <CredentialPanel data={byCred} />
     </div>
@@ -513,7 +513,7 @@ function DistributionPanels({
 
 function ModelPanel({ data, timeText }: { data: ModelDistribution[]; timeText: string }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardContent className="p-4 sm:p-5">
         <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-base font-semibold tracking-tight">按模型分布</h2>
@@ -528,8 +528,8 @@ function ModelPanel({ data, timeText }: { data: ModelDistribution[]; timeText: s
 
 function ModelTable({ data }: { data: ModelDistribution[] }) {
   return (
-    <div className="mt-3 max-h-32 overflow-auto text-[12px]">
-      <table className="min-w-[420px] w-full">
+    <div className="mt-3 max-h-32 max-w-full overflow-x-auto overflow-y-auto text-[12px]">
+      <table className="w-full min-w-[360px] sm:min-w-[420px]">
         <thead className="text-muted-foreground">
           <tr>
             <th className="text-left font-medium pb-1">模型</th>
@@ -555,7 +555,7 @@ function ModelTable({ data }: { data: ModelDistribution[] }) {
 
 function CredentialPanel({ data }: { data: CredentialDistribution[] }) {
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardContent className="p-4 sm:p-5">
         <div className="mb-3 flex items-center justify-between gap-3">
           <h2 className="text-base font-semibold tracking-tight">按上游凭据分布</h2>

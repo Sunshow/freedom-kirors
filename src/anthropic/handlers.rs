@@ -656,6 +656,7 @@ pub async fn post_messages(
         .unwrap_or(false);
 
     let tool_name_map = conversion_result.tool_name_map;
+    let known_tool_names = conversion_result.known_tool_names;
 
     // CacheMeter：根据 cache_control 断点查 / 写中转层提示词缓存。
     // 返回 estimate 口径的覆盖量；真实 input/cache 互斥分摊在拿到 total 真值时进行。
@@ -682,6 +683,7 @@ pub async fn post_messages(
             total_input_tokens,
             thinking_enabled,
             tool_name_map,
+            known_tool_names,
             hook,
             cache_usage,
             tracer,
@@ -705,6 +707,7 @@ pub async fn post_messages(
             total_input_tokens,
             extract_thinking,
             tool_name_map,
+            known_tool_names,
             hook,
             cache_usage,
             tracer,
@@ -721,6 +724,7 @@ async fn handle_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    known_tool_names: std::collections::HashSet<String>,
     hook: UsageRecordHook,
     cache_usage: super::cache_metering::CacheUsage,
     tracer: std::sync::Arc<RequestTracer>,
@@ -747,8 +751,13 @@ async fn handle_stream_request(
     let credential_id = call_result.credential_id;
 
     // 创建流处理上下文
-    let mut ctx =
-        StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
+    let mut ctx = StreamContext::new_with_thinking(
+        model,
+        input_tokens,
+        thinking_enabled,
+        tool_name_map,
+        known_tool_names,
+    );
     ctx.cache_usage = cache_usage;
 
     // 生成初始事件
@@ -913,6 +922,9 @@ async fn handle_non_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    // 非流式路径直接处理结构化 Event::ToolUse，不经过 <invoke> 文本嗅探，
+    // 因此这里不需要工具表校验；保留参数以对齐调用方签名。
+    _known_tool_names: std::collections::HashSet<String>,
     hook: UsageRecordHook,
     cache_usage: super::cache_metering::CacheUsage,
     tracer: std::sync::Arc<RequestTracer>,
@@ -1401,6 +1413,7 @@ pub async fn post_messages_cc(
         .unwrap_or(false);
 
     let tool_name_map = conversion_result.tool_name_map;
+    let known_tool_names = conversion_result.known_tool_names;
 
     // CacheMeter：根据 cache_control 断点查 / 写中转层提示词缓存。
     // 返回 estimate 口径的覆盖量；真实 input/cache 互斥分摊在拿到 total 真值时进行。
@@ -1426,6 +1439,7 @@ pub async fn post_messages_cc(
             &payload.model,
             thinking_enabled,
             tool_name_map,
+            known_tool_names,
             hook,
             total_input_tokens,
             cache_usage,
@@ -1450,6 +1464,7 @@ pub async fn post_messages_cc(
             total_input_tokens,
             extract_thinking,
             tool_name_map,
+            known_tool_names,
             hook,
             cache_usage,
             tracer,
@@ -1468,6 +1483,7 @@ async fn handle_stream_request_buffered(
     model: &str,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    known_tool_names: std::collections::HashSet<String>,
     hook: UsageRecordHook,
     fallback_input_tokens: i32,
     cache_usage: super::cache_metering::CacheUsage,
@@ -1499,6 +1515,7 @@ async fn handle_stream_request_buffered(
         fallback_input_tokens,
         thinking_enabled,
         tool_name_map,
+        known_tool_names,
     );
     ctx.set_cache_usage(cache_usage);
 

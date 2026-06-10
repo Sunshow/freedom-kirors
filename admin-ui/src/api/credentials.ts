@@ -64,23 +64,40 @@ export async function getCredentials(): Promise<CredentialsStatusResponse> {
 
 // ============ KAM 导出 ============
 
-/** KAM 导出账号（KAM 1.8.3+ 平铺格式） */
+/** KAM 导出账号内嵌的凭据对象（后端 ExportedCredentials，camelCase） */
+export interface KamExportCredentials {
+  accessToken?: string
+  csrfToken?: string
+  refreshToken?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  authRegion?: string
+  apiRegion?: string
+  startUrl?: string
+  expiresAt?: number
+  authMethod?: string
+  provider?: string
+  proxyUrl?: string
+  proxyUsername?: string
+  proxyPassword?: string
+}
+
+/** KAM 导出账号（后端 ExportedAccount，嵌套 credentials 结构） */
 export interface KamExportAccount {
+  id?: string
   email?: string
   nickname?: string
   idp?: string
-  provider?: string
-  status?: string
-  authMethod?: string
-  region?: string
-  startUrl?: string
-  clientId?: string
-  clientSecret?: string
-  refreshToken?: string
-  accessToken?: string
-  profileArn?: string
-  expiresAt?: string
+  userId?: string
   machineId?: string
+  profileArn?: string
+  endpoint?: string
+  priority?: number
+  credentials?: KamExportCredentials
+  status?: string
+  createdAt?: number
+  lastUsedAt?: number
 }
 
 export interface KamExportResponse {
