@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format
 loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+
+## [Freedom 二次开发版] - 2026-06-13
+
+主题：**基于上游 v0.6.6 的生产部署增强版**。本节记录 `TWLW9784/freedom-kirors` 相对上游 `ZyphrZero/kiro.rs` 的二次开发、生产补丁和部署维护变更。后续每次合并官方仓库、调整本地生产补丁或推送部署仓库，都必须同步补充本节或新增日期小节，避免代码变化无记录。
+
+### 维护规范
+
+- **合并必写日志**：每次合并上游官方版本后，记录上游版本号、合并策略、冲突处理重点、保留/重做的本地补丁和验证结果。
+- **推送必写日志**：每次向 `freedom-kirors/main` 推送本地生产改动前，记录变更目的、影响范围、是否涉及配置/凭据/数据库以及验证命令。
+- **敏感文件不上库**：运行时配置、Kiro 凭据、客户端 Key、代理池、trace 数据库、缓存和备份文件必须保持 ignored；推送前做敏感路径和 token 模式检查。
+- **部署状态可追溯**：重要上线动作应记录提交号、构建命令、服务状态和关键接口健康检查结果。
+
+### 2026-06-13
+
+- **合并上游 v0.6.6**：同步官方账号分组管理、密钥模型重构、Native web_search 识别收窄等改动，并保留生产部署中的凭据导入去重、实时并发展示、余额展示、压测页、限流监控、代理/端点增强等本地补丁。
+- **修复合并适配问题**：补齐后端分组 handler/router、前端分组筛选状态和类型定义，解决官方分组 UI 与本地 dashboard/压测/限流功能的冲突。
+- **沉淀部署仓库**：创建并推送 `TWLW9784/freedom-kirors/main`，本地生产分支统一为 `main` 并跟踪 `github-deploy/main`；删除远端多余 `master` 分支。
+- **补充二次开发说明**：README 新增“二次开发说明”，明确本仓库是基于上游 `ZyphrZero/kiro.rs` 的二次开发与生产部署版本，并说明主要增强方向。
+- **清理本地 Git 风险对象**：清空旧 stash、过期 reflog 并 GC，避免历史 stash 中的运行时文件在误操作时被带出。
+- **验证结果**：`cargo check --release`、`npm --prefix admin-ui run build`、`cargo build --release` 通过；`kiro-rs.service` 为 `active`；`/admin`、`/api/admin/credentials`、`/api/admin/groups`、`/api/admin/traces/recent-stats`、`/api/admin/limiter/snapshots` 均返回 200。
+
 ## [0.6.6] - 2026-06-13
 
 主题：**账号分组管理（独立实体 + 调度隔离）+ 密钥模型重构（系统默认密钥 id=0）+ Native web_search 工具检测收窄**。分组从依附于凭据 / Key 的字符串标签提升为一等实体，独立持久化、改名 / 删除自动级联，并打通凭据列表筛选、概览页按分组统计与客户端 Key 的调度隔离；同时重构密钥模型——移除 `/v1` 流量主密钥概念，`apiKey` 每次启动幂等导入为不可删除的系统「默认密钥」（固定 `id=0` 对齐历史用量），`adminApiKey` 保留为管理面板登录密钥；此外收窄原生 web_search 工具识别，避免客户端自定义的同名普通工具被误判进内部搜索循环。
