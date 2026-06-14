@@ -1666,55 +1666,48 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
         {data?.credentials && data.credentials.length > 0 && (
           <Card className="mb-5">
             <CardContent className="p-4 space-y-3">
+              {/* 单行工具栏：状态筛选 + 搜索 + 排序 + 重置 */}
               <div className="flex flex-wrap items-center gap-2">
-                {(["all", "enabled", "disabled", "free", "pro", "pro-plus", "power"] as CredentialFilter[]).map((key) => (
-                  <Button
-                    key={key}
-                    type="button"
-                    size="sm"
-                    variant={credentialFilter === key ? "default" : "outline"}
-                    onClick={() => setCredentialFilter(key)}
-                  >
-                    {credentialFilterLabels[key]}
-                    {key === "available-pro" && ` (${subscriptionStats.availableAnyPro})`}
-                    {key === "pro" && ` (${subscriptionStats.pro})`}
-                    {key === "pro-plus" && ` (${subscriptionStats.proPlus})`}
-                    {key === "power" && ` (${subscriptionStats.power})`}
-                    {key === "free" && ` (${subscriptionStats.free})`}
-                    {key === "subscription-unknown" && ` (${subscriptionStats.unknown})`}
-                  </Button>
-                ))}
+                {/* 状态 / 订阅筛选（单个下拉，取代原来的七按钮平铺 + 重复下拉）*/}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button type="button" size="sm" variant="outline">
-                      更多筛选：{credentialFilterLabels[credentialFilter]}
+                    <Button type="button" size="sm" variant="outline" className="h-10">
+                      筛选：{credentialFilterLabels[credentialFilter]}
                       <ChevronDown className="h-3.5 w-3.5" />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
-                    <DropdownMenuLabel>筛选</DropdownMenuLabel>
+                    <DropdownMenuLabel>状态 / 订阅筛选</DropdownMenuLabel>
                     {(Object.keys(credentialFilterLabels) as CredentialFilter[]).map((key) => (
                       <DropdownMenuItem key={key} onSelect={() => setCredentialFilter(key)}>
                         <span className="w-4 text-center">{credentialFilter === key ? "✓" : ""}</span>
                         {credentialFilterLabels[key]}
+                        {key === "available-pro" && ` (${subscriptionStats.availableAnyPro})`}
+                        {key === "pro" && ` (${subscriptionStats.pro})`}
+                        {key === "pro-plus" && ` (${subscriptionStats.proPlus})`}
+                        {key === "power" && ` (${subscriptionStats.power})`}
+                        {key === "free" && ` (${subscriptionStats.free})`}
+                        {key === "subscription-unknown" && ` (${subscriptionStats.unknown})`}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
+
+                {/* 搜索框 */}
                 <div className="relative min-w-0 flex-1 basis-full sm:basis-auto sm:min-w-[240px]">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     value={credentialSearch}
                     onChange={(e) => setCredentialSearch(e.target.value)}
                     placeholder="搜索邮箱 / ID / 端点"
-                    className="pl-9"
+                    className="h-10 pl-9"
                   />
                 </div>
+
+                {/* 排序 */}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button type="button" variant="outline" className="h-10">
+                    <Button type="button" size="sm" variant="outline" className="h-10">
                       排序：{credentialSortLabels[credentialSortKey]} · {credentialSortDirection === "asc" ? "升序" : "降序"}
                       <ChevronDown className="h-3.5 w-3.5" />
                     </Button>
@@ -1738,10 +1731,13 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
+
+                {/* 重置 */}
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
+                  className="h-10"
                   disabled={!credentialSearch && credentialFilter === "all" && credentialSortKey === "priority" && credentialSortDirection === "asc"}
                   onClick={() => {
                     setCredentialSearch("");

@@ -28,6 +28,7 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { SubscriptionBadge } from "@/components/subscription-badge";
@@ -52,7 +53,7 @@ import {
   useResetSuccessCount,
   useClearThrottle,
 } from "@/hooks/use-credentials";
-import { setCredentialOverage, testCredentialModel } from "@/api/credentials";
+import { setCredentialOverage, testCredentialModel, getCredentialModels } from "@/api/credentials";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -290,10 +291,13 @@ export function CredentialCard({
   }, [clearThrottle, credential.id]);
   const [overageBusy, setOverageBusy] = useState(false);
   const [testingModel, setTestingModel] = useState(false);
-  const handleTestModel = async () => {
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const handleTestModel = async (model?: string) => {
     setTestingModel(true);
     try {
-      const res = await testCredentialModel(credential.id);
+      const res = await testCredentialModel(credential.id, model);
       if (res.ok) {
         toast.success(
           `#${credential.id} 模型测试成功：${res.model} · ${res.endpoint} · ${res.status} · ${formatMs(res.elapsedMs)}`,
@@ -307,6 +311,21 @@ export function CredentialCard({
       toast.error("模型测试失败: " + extractErrorMessage(err));
     } finally {
       setTestingModel(false);
+    }
+  };
+  // 打开测试菜单时按需拉取该凭据可用模型列表（只拉一次）
+  const handleOpenModelMenu = async (open: boolean) => {
+    setModelMenuOpen(open);
+    if (open && modelOptions.length === 0 && !loadingModels) {
+      setLoadingModels(true);
+      try {
+        const res = await getCredentialModels(credential.id);
+        setModelOptions(res.models.map((m) => m.modelId).filter(Boolean));
+      } catch (err) {
+        toast.error("获取可用模型失败: " + extractErrorMessage(err));
+      } finally {
+        setLoadingModels(false);
+      }
     }
   };
   const handleSetOverage = async (enabled: boolean) => {
@@ -1032,21 +1051,59 @@ export function CredentialCard({
                 />
                 <span className="hidden sm:inline">刷新余额</span>
               </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="shrink-0 px-2.5"
-                onClick={handleTestModel}
-                disabled={testingModel || credential.disabled}
-                title={credential.disabled ? "已禁用" : "用该凭据真实调用一次测试模型"}
-              >
-                {testingModel ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <FlaskConical className="h-3.5 w-3.5" />
-                )}
-                <span className="hidden sm:inline">测试模型</span>
-              </Button>
+              <DropdownMenu open={modelMenuOpen} onOpenChange={handleOpenModelMenu}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="shrink-0 px-2.5"
+                    disabled={testingModel || credential.disabled}
+                    title={credential.disabled ? "已禁用" : "选择一个模型用该凭据真实调用一次测试"}
+                  >
+                    {testingModel ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <FlaskConical className="h-3.5 w-3.5" />
+                    )}
+                    <span className="hidden sm:inline">测试模型</span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto">
+                  <DropdownMenuLabel>选择测试模型</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      setModelMenuOpen(false);
+                      handleTestModel();
+                    }}
+                  >
+                    <FlaskConical className="h-3.5 w-3.5" />
+                    默认（claude-opus-4.8）
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {loadingModels ? (
+                    <DropdownMenuItem disabled>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      正在拉取可用模型…
+                    </DropdownMenuItem>
+                  ) : modelOptions.length === 0 ? (
+                    <DropdownMenuItem disabled>无可用模型（或拉取失败）</DropdownMenuItem>
+                  ) : (
+                    modelOptions.map((m) => (
+                      <DropdownMenuItem
+                        key={m}
+                        onSelect={(e) => {
+                          e.preventDefault();
+                          setModelMenuOpen(false);
+                          handleTestModel(m);
+                        }}
+                      >
+                        {m}
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
 
             <div className="flex min-w-0 items-center gap-1.5 min-[560px]:shrink-0">
